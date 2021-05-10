@@ -199,6 +199,12 @@ class ExpressionModel(BaseModel):
             read_depth = pyro.sample(
                 "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1))
 
+    def get_latent_MAP(self, raw_expr, encoded_expr, read_depth):
+        theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
+
+        Z = theta_loc.cpu().detach().numpy()
+        return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
+
 
     def get_batches(self, count_matrix, batch_size = 32, bar = False):
         
@@ -254,6 +260,7 @@ class ExpressionModel(BaseModel):
 
         self.deviance_model = GeneDevianceModel()
         self.deviance_model.set_pi(state['deviance_pi'])
+        self.set_device('cpu')
         #self.genes = state['genes']
 
 

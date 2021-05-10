@@ -46,7 +46,6 @@ class BaseModel(nn.Module):
         self.use_cuda = torch.cuda.is_available() and use_cuda
         logging.info('Using CUDA: {}'.format(str(self.use_cuda)))
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
-
         self.to(self.device)
         self.max_prob = torch.tensor([0.99999], requires_grad = False).to(self.device)
 
@@ -98,11 +97,20 @@ class BaseModel(nn.Module):
         return pyro.param("dispersion").cpu().detach().numpy()
 
 
-    def get_latent_MAP(self, X):
-        theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(X)
+    def to_gpu(self):
+        self.set_device('cuda:0')
+    
+    def to_cpu(self):
+        self.set_device('cpu')
 
-        Z = theta_loc.cpu().detach().numpy()
-        return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
+    def set_device(self, device):
+        logging.info('Moving model to device: {}'.format(device))
+        self.device = device
+        self.to(self.device)
+
+
+    def get_latent_MAP(self, *data):
+        raise NotImplementedError()
 
 
     def predict(self, X, batch_size = 32):
@@ -112,7 +120,7 @@ class BaseModel(nn.Module):
 
         latent_vars = []
         for i,batch in enumerate(self.get_batches(X, batch_size = batch_size)):
-            latent_vars.append(self.get_latent_MAP(batch[self.encoder_features_index]))
+            latent_vars.append(self.get_latent_MAP(*batch))
 
         theta = np.vstack(latent_vars)
 
@@ -184,8 +192,7 @@ class BaseModel(nn.Module):
             logging.error('Interrupted training.')
 
         self.eval()
-        self.device = 'cpu'
-        self.to(self.device)
+        self.set_device('cpu')
         return self
 
     def to_tensor(self, val):

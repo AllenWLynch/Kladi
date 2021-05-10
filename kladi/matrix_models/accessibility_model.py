@@ -64,7 +64,7 @@ class Decoder(nn.Module):
         return F.softmax(self.bn(self.beta(inputs)), dim=1)
 
 
-class AccessibilityModel(nn.Module):
+class AccessibilityModel(BaseModel):
 
     def __init__(self, peaks, num_modules = 15, initial_counts = 10, 
         dropout = 0.2, hidden = 128, use_cuda = True):
@@ -114,7 +114,7 @@ class AccessibilityModel(nn.Module):
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
 
 
-    def get_latent_MAP(self, idx, read_depth):
+    def get_latent_MAP(self, idx, read_depth, oneshot_obs = None):
         theta_loc, theta_scale = self.encoder(idx, read_depth)
         return np.exp(theta_loc.cpu().detach().numpy())
 
@@ -129,11 +129,14 @@ class AccessibilityModel(nn.Module):
         
         assert(np.isclose(X.data.astype(np.int64), X.data).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
-        return X.data.astype(np.int64)
+        logging.info('Binarizing accessibility matrix ...')
+        X.data = np.ones_like(X.data)
+
+        return X
 
 
     def get_onehot_tensor(self, idx):
-        return torch.zeros(idx.shape[0], self.num_peaks, device = self.device).scatter_(1, idx, 1).to(self.device)
+        return torch.zeros(idx.shape[0], self.num_features, device = self.device).scatter_(1, idx, 1).to(self.device)
 
     def get_padded_idx_matrix(self, accessibility_matrix, read_depth):
 
@@ -157,12 +160,12 @@ class AccessibilityModel(nn.Module):
         N = accessibility_matrix.shape[0]
 
         assert(isspmatrix(accessibility_matrix))
-        assert(accessibility_matrix.shape[1] <= self.num_peaks)
+        assert(accessibility_matrix.shape[1] <= self.num_features)
 
         accessibility_matrix = accessibility_matrix.tocsr()
         read_depth = torch.from_numpy(np.array(accessibility_matrix.sum(-1))).to(self.device)
 
-        for batch_start, batch_end in self.iterate_batch_idx(N, batch_size):
+        for batch_start, batch_end in self.iterate_batch_idx(N, batch_size, bar = True):
 
             rd_batch = read_depth[batch_start:batch_end]
             idx_batch = torch.from_numpy(self.get_padded_idx_matrix(accessibility_matrix[batch_start : batch_end], rd_batch)).to(self.device)
@@ -180,6 +183,7 @@ class AccessibilityModel(nn.Module):
         self.load_state_dict(state['state'])
         self.eval()
         self.peaks = state['peaks']
+        self.set_device('cpu')
 
     def _argsort_peaks(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
@@ -208,8 +212,7 @@ class AccessibilityModel(nn.Module):
         assert(len(hits_matrix.shape) == 2)
         assert(hits_matrix.shape[1] == len(self.peaks))
         hits_matrix = hits_matrix.to_csr()
-        
-        #binarize hits matrix
+
         hits_matrix.data = np.ones_like(hits_matrix.data)
         return hits_matrix
 
