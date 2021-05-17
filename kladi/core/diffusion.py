@@ -13,7 +13,7 @@ def reduce_distance_matrix_func(distances,start,*,ka,neighborhood_size):
     return neighbor_coors, neighbor_distances, kernel_width
 
 def get_matrix_params(embeddings,*,ka,neighborhood_size,
-    metric = 'euclidean', n_jobs = 1, working_memory = None):
+    metric = 'euclidean', n_jobs = 1, working_memory = None, clip = None):
 
     reduce_function = partial(reduce_distance_matrix_func, ka = ka, 
         neighborhood_size = neighborhood_size)
@@ -23,6 +23,9 @@ def get_matrix_params(embeddings,*,ka,neighborhood_size,
             metric = metric, n_jobs = n_jobs, working_memory = working_memory)
         )
     ))
+
+    if not clip is None:
+        kernel_width = np.clip(kernel_width, 0, np.quantile(kernel_width, clip))
 
     return neighbor_coors, neighbor_distances, kernel_width
 

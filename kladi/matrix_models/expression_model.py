@@ -7,11 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions.constraints as constraints
 from tqdm import tqdm
-import logging
 import warnings
 
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel
+from kladi.matrix_models.scipm_base import BaseModel, logger
 import configparser
 import requests
 import json
@@ -42,7 +41,7 @@ class GeneDevianceModel:
 
     def fit(self, y_ij):
 
-        logging.info('Learning deviance featurization for transcript counts ...')
+        logger.info('Learning deviance featurization for transcript counts ...')
         self.pi_j_hat = y_ij.sum(axis = 0)/y_ij.sum()
 
         return self
@@ -130,8 +129,8 @@ class ExpressionModel(BaseModel):
         testing_loss = []
         for K in num_modules:
             assert(isinstance(K, int) and K > 0)
-            logging.info('Training model with {} modules ...'.format(str(K)))
-            logging.info('----------------------------------')
+            logger.info('Training model with {} modules ...'.format(str(K)))
+            logger.info('----------------------------------')
             test_model = cls(genes, num_modules=K, initial_counts = initial_counts, dropout=dropout, hidden=hidden, use_cuda=use_cuda)
             test_model.fit(counts, num_epochs = num_epochs, batch_size = batch_size, learning_rate = learning_rate, eval_every = eval_every, 
                 test_proportion = test_proportion, use_validation_set = True)
@@ -199,14 +198,14 @@ class ExpressionModel(BaseModel):
             read_depth = pyro.sample(
                 "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1))
 
-    def get_latent_MAP(self, raw_expr, encoded_expr, read_depth):
+    def _get_latent_MAP(self, raw_expr, encoded_expr, read_depth):
         theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
 
         Z = theta_loc.cpu().detach().numpy()
         return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
 
 
-    def get_batches(self, count_matrix, batch_size = 32, bar = False):
+    def _get_batches(self, count_matrix, batch_size = 32, bar = False):
         
         N = len(count_matrix)
         
@@ -215,10 +214,10 @@ class ExpressionModel(BaseModel):
         except AttributeError:
             self.deviance_model = GeneDevianceModel().fit(count_matrix)
 
-        for batch_start, batch_end in self.iterate_batch_idx(N, batch_size):
-            yield self.featurize(count_matrix[batch_start : batch_end, :])
+        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size):
+            yield self._featurize(count_matrix[batch_start : batch_end, :])
 
-    def validate_data(self, X):
+    def _validate_data(self, X):
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
         
         if isspmatrix(X):
@@ -238,7 +237,7 @@ class ExpressionModel(BaseModel):
         assert(latent_compositions.shape[1] == self.num_topics)
         assert(np.isclose(latent_compositions.sum(-1), 1).all())
 
-        latent_compositions = self.to_tensor(latent_compositions)
+        latent_compositions = self._to_tensor(latent_compositions)
 
         return self.decoder(latent_compositions)[0].cpu().detach().numpy()
 
@@ -264,19 +263,19 @@ class ExpressionModel(BaseModel):
         #self.genes = state['genes']
 
 
-    def featurize(self, count_matrix):
+    def _featurize(self, count_matrix):
 
         encoded_counts = self.deviance_model.transform(count_matrix)
         read_depth = count_matrix.sum(-1, keepdims = True)
 
         encoded_counts = np.hstack([encoded_counts, np.log(read_depth)])
 
-        return self.to_tensor(count_matrix), self.to_tensor(encoded_counts), self.to_tensor(read_depth)
+        return self._to_tensor(count_matrix), self._to_tensor(encoded_counts), self._to_tensor(read_depth)
 
     def rank_genes(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
 
-        return self.genes[np.argsort(self.get_beta()[module_num, :])]
+        return self.genes[np.argsort(self._get_beta()[module_num, :])]
 
     def get_top_genes(self, module_num, top_n = 200):
         return self.rank_genes(module_num)[-top_n : ]
@@ -293,7 +292,7 @@ class ExpressionModel(BaseModel):
             'list': (None, top_genes),
         }
 
-        logging.info('Querying Enrichr with module {} genes.'.format(str(module_num)))
+        logger.info('Querying Enrichr with module {} genes.'.format(str(module_num)))
         response = requests.post(enrichr_url + post_endpoint, files=payload)
         if not response.ok:
             raise Exception('Error analyzing gene list')
@@ -319,7 +318,7 @@ class ExpressionModel(BaseModel):
 
     def get_enrichments(self, list_id):
 
-        logging.info('Downloading results ...')
+        logger.info('Downloading results ...')
 
         enrichments = {
             ontology : self.get_ongology(list_id, ontology=ontology)

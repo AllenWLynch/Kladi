@@ -47,31 +47,33 @@ def convert_jaspar_to_moods_pfm(jaspar_file):
     with open(jaspar_file, 'r') as f:
         jaspar_matrix = f.readlines()
 
-    def strip_extras(jaspar_line):
-        return ' '.join(jaspar_line.split(' ')[3:-1])
-        
-    pfm_matrix = '\n'.join([strip_extras(x) for x in jaspar_matrix[1:]])
-
-    with open(jaspar_file, 'w') as f:
-        print(pfm_matrix, end = '', file = f)
-
-
-def download_jaspar_metadata():
-
-    r = requests.get(config.get('jaspar','metadata_url'))
-    if r.ok:
-        pass
+    try:
+        motif_id, factor_name = jaspar_matrix[0].strip('>').strip().split('\t')
+    except ValueError:
+        os.remove(jaspar_file)
     else:
-        raise Exception('Error downloading motifs database from JASPAR')
+        def strip_extras(jaspar_line):
+            return ' '.join(jaspar_line.split(' ')[3:-1])
+            
+        pfm_matrix = '\n'.join([strip_extras(x) for x in jaspar_matrix[1:]])
 
+        os.remove(jaspar_file)
+
+        new_motif_filename = os.path.join(config.get('data','motifs'), '{}_{}.{}'.format(
+                motif_id, factor_name, config.get('jaspar','pfm_suffix')
+            ).replace('/', '-'))
+        with open( new_motif_filename, 'w') as f:
+            print(pfm_matrix, end = '', file = f)
+
+        try:
+            np.loadtxt(new_motif_filename)
+        except ValueError:
+            os.remove(new_motif_filename)
 
 def download_jaspar_motifs():
 
     if not os.path.isdir(config.get('data','root')):
         os.mkdir(config.get('data','root'))
-    else:
-        pass
-        #os.remove(config.get('data','dir'))
 
     r = requests.get(config.get('jaspar','motifs_url'))
 
@@ -108,6 +110,10 @@ def list_motif_matrices():
 
     return list(glob(get_motif_glob_str()))
 
+def list_motif_ids():
+    return [os.path.basename(x).strip('.jaspar').split('_') for x in list_motif_matrices()]
+
+
 def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
 
     logger.info('Scanning peaks for motif hits with p >= {} ...'.format(str(pvalue_threshold)))
@@ -121,7 +127,7 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
     logger.info('Building motif background models ...')
     process = subprocess.Popen(' '.join(command), stdout=subprocess.PIPE, shell=True, stderr=subprocess.PIPE)
 
-    motif_matrices = list_motif_matrices()
+    motif_matrices = [os.path.basename(x).strip('.{}'.format(config.get('jaspar','pfm_suffix'))) for x in list_motif_matrices()]
     motif_idx_map = dict(zip(motif_matrices, np.arange(len(motif_matrices))))
 
     motif_indices, peak_indices, scores = [],[],[]
@@ -137,7 +143,8 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
             i+=1
 
             peak_num, motif, hit_pos, strand, score, site, snp = line.decode().strip().split(',')
-
+            
+            motif = motif.strip('.{}'.format(config.get('jaspar','pfm_suffix')))
             motif_indices.append(motif_idx_map[motif])
             peak_indices.append(peak_num)
             scores.append(float(score))
@@ -150,7 +157,7 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
 
     logger.info('Formatting hits matrix ...')
     return sparse.coo_matrix((scores, (peak_indices, motif_indices)), 
-        shape = (num_peaks, len(motif_matrices))).tocsr()
+        shape = (num_peaks, len(motif_matrices))).tocsr().T.tocsr()
 
 
 def purge_motif_matrices():
@@ -158,7 +165,7 @@ def purge_motif_matrices():
         os.remove(matrix)
 
 
-def get_motif_enrichments(peaks, genome, pvalue_threshold = 0.00005):
+def get_motif_enrichments(peaks, genome, pvalue_threshold = 0.0001):
 
     peaks = validate_peaks(peaks)
 
@@ -168,14 +175,17 @@ def get_motif_enrichments(peaks, genome, pvalue_threshold = 0.00005):
         if len(list_motif_matrices()) == 0:
             raise Exception('Problem downloading motifs from JASPAR!')
 
-    temp_fasta = tempfile.TemporaryFile()
+    temp_fasta = tempfile.NamedTemporaryFile(delete = False)
+    temp_fasta_name = temp_fasta.name
+    temp_fasta.close()
 
     try:
-        get_peak_sequences(peaks, genome, temp_fasta)
+        get_peak_sequences(peaks, genome, temp_fasta_name)
 
-        hits_matrix = get_motif_hits(temp_fasta, len(peaks), pvalue_threshold = pvalue_threshold)
+        hits_matrix = get_motif_hits(temp_fasta_name, len(peaks), pvalue_threshold = pvalue_threshold)
 
-        #get metadata too
+        ids, factors = list(zip(*list_motif_ids()))
+        return hits_matrix, ids, factors
 
     finally:
-        os.remove(temp_fasta)
+        os.remove(temp_fasta_name)

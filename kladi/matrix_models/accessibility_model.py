@@ -7,13 +7,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions.constraints as constraints
 from tqdm import tqdm
-import logging
 import warnings
 
 from scipy import sparse
 from scipy.stats import fisher_exact
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel
+from kladi.matrix_models.scipm_base import BaseModel, logger
+from kladi.motif_scanning import moods_scan
 import configparser
 import requests
 import json
@@ -114,11 +114,13 @@ class AccessibilityModel(BaseModel):
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
 
 
-    def get_latent_MAP(self, idx, read_depth, oneshot_obs = None):
+    def _get_latent_MAP(self, idx, read_depth, oneshot_obs = None):
         theta_loc, theta_scale = self.encoder(idx, read_depth)
-        return np.exp(theta_loc.cpu().detach().numpy())
+        
+        Z = theta_loc.cpu().detach().numpy()
+        return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
 
-    def validate_data(self, X):
+    def _validate_data(self, X):
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
         
         if not isspmatrix(X):
@@ -129,16 +131,16 @@ class AccessibilityModel(BaseModel):
         
         assert(np.isclose(X.data.astype(np.int64), X.data).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
-        logging.info('Binarizing accessibility matrix ...')
+        logger.info('Binarizing accessibility matrix ...')
         X.data = np.ones_like(X.data)
 
         return X
 
 
-    def get_onehot_tensor(self, idx):
+    def _get_onehot_tensor(self, idx):
         return torch.zeros(idx.shape[0], self.num_features, device = self.device).scatter_(1, idx, 1).to(self.device)
 
-    def get_padded_idx_matrix(self, accessibility_matrix, read_depth):
+    def _get_padded_idx_matrix(self, accessibility_matrix, read_depth):
 
         width = read_depth.max()
 
@@ -155,7 +157,7 @@ class AccessibilityModel(BaseModel):
         return dense_matrix.astype(np.int64)
 
 
-    def get_batches(self, accessibility_matrix, batch_size = 32):
+    def _get_batches(self, accessibility_matrix, batch_size = 32):
 
         N = accessibility_matrix.shape[0]
 
@@ -165,17 +167,32 @@ class AccessibilityModel(BaseModel):
         accessibility_matrix = accessibility_matrix.tocsr()
         read_depth = torch.from_numpy(np.array(accessibility_matrix.sum(-1))).to(self.device)
 
-        for batch_start, batch_end in self.iterate_batch_idx(N, batch_size, bar = True):
+        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = True):
 
             rd_batch = read_depth[batch_start:batch_end]
-            idx_batch = torch.from_numpy(self.get_padded_idx_matrix(accessibility_matrix[batch_start : batch_end], rd_batch)).to(self.device)
-            onehot_batch = self.get_onehot_tensor(idx_batch)
+            idx_batch = torch.from_numpy(self._get_padded_idx_matrix(accessibility_matrix[batch_start : batch_end], rd_batch)).to(self.device)
+            onehot_batch = self._get_onehot_tensor(idx_batch)
 
             yield idx_batch, read_depth[batch_start:batch_end], onehot_batch
 
     def save(self, filename):
         state_dict = dict(state = self.state_dict())
         state_dict['peaks'] = self.peaks
+        
+        try:
+            self.motif_hits
+        except AttributeError:
+            pass
+        else:
+            motif_dictionary = dict(
+                indptr = self.motif_hits.indptr,
+                indices = self.motif_hits.indices,
+                score = self.motif_hits.data,
+                ids = self.motif_ids,
+                factor_names = self.factor_names,
+            )
+            state_dict['motifs'] = motif_dictionary
+
         torch.save(state_dict, filename)
 
     def load(self, filename):
@@ -185,9 +202,15 @@ class AccessibilityModel(BaseModel):
         self.peaks = state['peaks']
         self.set_device('cpu')
 
+        if 'motifs' in state:
+            self.motif_ids = state['motifs']['ids']
+            self.factor_names = state['motifs']['factor_names']
+            self.motif_hits = sparse.csr_matrix((state['motifs']['score'], state['motifs']['indices'], state['motifs']['indptr']), shape = (len(self.motif_ids), len(self.peaks)))
+
+
     def _argsort_peaks(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
-        return np.argsort(self.get_beta()[module_num, :])
+        return np.argsort(self._get_beta()[module_num, :])
 
     def rank_peaks(self, module_num):
         return self.peaks[self._argsort_peaks(module_num)]
@@ -195,7 +218,7 @@ class AccessibilityModel(BaseModel):
     def get_top_peaks(self, module_num, top_n = 20000):
         return self.rank_peaks(module_num)[-top_n : ]
 
-    def batch_impute(self, latent_compositions, batch_size = 32):
+    def _batch_impute(self, latent_compositions, batch_size = 32):
 
         assert(isinstance(latent_compositions, np.ndarray))
         assert(len(latent_compositions.shape) == 2)
@@ -204,34 +227,52 @@ class AccessibilityModel(BaseModel):
 
         latent_compositions = self.to_tensor(latent_compositions)
 
-        for batch_start, batch_end in self.iterate_batch_idx(len(latent_compositions), batch_size, bar = True):
+        for batch_start, batch_end in self._iterate_batch_idx(len(latent_compositions), batch_size, bar = True):
             yield self.decoder(latent_compositions[batch_start:batch_end, :]).cpu().detach().numpy()
 
-    def validate_hits_matrix(self, hits_matrix):
+    def _validate_hits_matrix(self, hits_matrix):
         assert(isspmatrix(hits_matrix))
         assert(len(hits_matrix.shape) == 2)
         assert(hits_matrix.shape[1] == len(self.peaks))
-        hits_matrix = hits_matrix.to_csr()
+        hits_matrix = hits_matrix.tocsr()
 
         hits_matrix.data = np.ones_like(hits_matrix.data)
         return hits_matrix
 
-    def _get_motif_score(self, latent_compositions, hits_matrix):
-        hits_matrix = self.validate_hits_matrix(hits_matrix)
 
-        return np.vstack([hits_matrix.dot(np.log(peak_probabilities).T).T
-            for peak_probabilities in self.batch_impute(latent_compositions)], bar = True)
+    def get_motif_hits_in_peaks(self, genome_fasta, p_value_threshold = 0.0001):
+        
+        self.motif_hits, self.motif_ids, self.factor_names = moods_scan.get_motif_enrichments(self.peaks.tolist(), genome_fasta, pvalue_threshold = p_value_threshold)
 
 
-    def _enrich_TFs(self, module_num, hits_matrix, top_quantile = 0.2):
-        hits_matrix = self.validate_hits_matrix(hits_matrix)
+    def get_motif_score(self, latent_compositions):
+
+        try:
+            self.motif_hits
+        except AttributeError:
+            raise Exception('Motif hits not yet calculated, run "get_motif_hits_in_peaks" function first!')
+
+        hits_matrix = self._validate_hits_matrix(self.motif_hits)
+
+        return list(zip(self.motif_ids, self.factor_names)), np.vstack([hits_matrix.dot(np.log(peak_probabilities).T).T
+            for peak_probabilities in self._batch_impute(latent_compositions)])
+
+
+    def enrich_TFs(self, module_num, top_quantile = 0.2):
+
+        try:
+            self.motif_hits
+        except AttributeError:
+            raise Exception('Motif hits not yet calculated, run "get_motif_hits_in_peaks" function first!')
+
+        hits_matrix = self._validate_hits_matrix(self.motif_hits)
         assert(isinstance(top_quantile, float) and top_quantile > 0 and top_quantile < 1)
 
         module_idx = self._argsort_peaks(module_num)[-int(self.num_features*top_quantile) : ]
-        logging.info('Finding enrichment in top {} peaks ...'.format(str(len(module_idx))))
+        logger.info('Finding enrichment in top {} peaks ...'.format(str(len(module_idx))))
 
-        pvals = []
-        for i in tqdm(range(len(hits_matrix))):
+        pvals, test_statistics = [], []
+        for i in tqdm(range(hits_matrix.shape[0])):
 
             tf_hits = hits_matrix[i,:].indices
             overlap = len(np.intersect1d(tf_hits, module_idx))
@@ -242,8 +283,13 @@ class AccessibilityModel(BaseModel):
             contingency_matrix = np.array([[overlap, module_only], [tf_only, neither]])
             stat,pval = fisher_exact(contingency_matrix, alternative='greater')
             pvals.append(pval)
+            test_statistics.append(stat)
 
-        return np.array(pvals)
+        return sorted(list(zip(self.motif_ids, self.factor_names, pvals, test_statistics)), key = lambda x:(x[2], -x[3]))
+
+    @staticmethod
+    def plot_motif_enrichments(enrichment_results):
+        pass
 
 
     def get_gene_activity(self, latent_compositions, rp_models):
