@@ -1,6 +1,104 @@
 
 import warnings
 import numpy as np
+from matplotlib.colors import Normalize
+from matplotlib import cm
+from matplotlib.patches import Patch
+import matplotlib.pyplot as plt
+
+def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwargs = {}, cbar_kwargs = {}):
+
+    assert(isinstance(c, np.ndarray))
+
+    if np.issubdtype(c.dtype, np.number):
+
+        colormapper=cm.ScalarMappable(Normalize(c.min(), c.max()), cmap=palette)
+        c = colormapper.to_rgba(c)
+
+        if add_legend:
+            plt.colorbar(colormapper, ax=ax, **cbar_kwargs)
+
+        return c
+
+    else:
+        
+        classes = set(c)
+        if hue_order is None:
+            class_colors = dict(zip(classes, cm.get_cmap(palette)(np.arange(len(classes)))))
+        else:
+            assert(len(hue_order) == len(classes))
+            class_colors = dict(zip(hue_order, cm.get_cmap(palette)(np.arange(len(classes)))))
+
+        c = np.array([class_colors[c_class] for c_class in c])
+
+        if add_legend:
+            ax.legend(handles = [
+                Patch(color = color, label = str(c_class)) for c_class, color in class_colors.items()
+            ], **legend_kwargs)
+
+        return c
+
+def plot_umap(X, hue, palette = 'viridis', projection = '2d', ax = None, figsize= (10,5),
+        add_legend = True, hue_order = None, size = 2, title = None):
+
+    assert(isinstance(hue, np.ndarray))
+    hue = hue.ravel()
+    assert(len(hue) == len(X))
+
+    if projection == '3d':
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            raise Exception('Must install plotly to use this feature. Run conda install plotly or pip install plotly.')
+        
+        color = map_colors(None, hue, palette, add_legend=False, hue_order = hue_order)
+
+        if X.shape[-1] == 2:
+            z_dim = np.zeros(len(X))
+        else:
+            z_dim = X[:,2]
+
+        fig = go.Figure(data=[go.Scatter3d(
+            x=X[:,0],
+            y=X[:,1],
+            z=z_dim,
+            mode='markers',
+            marker=dict(
+                size=size,
+                color = color,
+                opacity=0.8
+            ),
+            hovertext=np.arange(len(X))
+        )])
+
+        fig.update_layout(scene=dict(xaxis = dict(showgrid=False, showticklabels = False, backgroundcolor="white", visible = False), 
+                                    yaxis = dict(showgrid=False, showticklabels = False, backgroundcolor="white", visible = False), 
+                                    zaxis = dict(showgrid = False, showticklabels = False, backgroundcolor="white", visible = False)),
+                        width=figsize[0]*100, height=figsize[1]*100,
+                        margin=dict(
+                            r=0, l=0,
+                            b=0, t=0)
+                        )
+        fig.show()
+        return fig
+
+    else:
+        
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize=figsize)
+
+        colors = map_colors(ax, hue, palette, add_legend=add_legend, hue_order = hue_order,
+                cbar_kwargs = dict(orientation = 'vertical', pad = 0.01, shrink = 0.5, aspect = 15, anchor = (1.05, 0.5)),
+                legend_kwargs = dict(loc="center left", markerscale = 4, frameon = False, title_fontsize='x-large', fontsize='large',
+                            bbox_to_anchor=(1.05, 0.5)))
+
+        ax.scatter(X[:,0], X[:,1], c = colors, s= size)
+        ax.axis('off')
+
+        if not title is None:
+            ax.set_title(str(title), fontdict= dict(fontsize = 'x-large'))
+
+        return ax
 
 class Beeswarm:
     """Modifies a scatterplot artist to show a beeswarm plot."""

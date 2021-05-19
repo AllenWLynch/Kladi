@@ -38,13 +38,15 @@ class LineageTree:
         dfs_tree = list(nx.dfs_predecessors(G, self.get_root()))[::-1] + [self.get_root()]
 
         node_positions = {}
+        num_termini = [0]
         branch_times = dict(list(iter(self)))
 
         def get_or_set_node_position(node):
 
             if not node in node_positions:
                 if isinstance(node, (int, np.int32, np.int64)):
-                    node_positions[node] = (len(node_positions), np.inf)
+                    node_positions[node] = (num_termini[0], np.inf)
+                    num_termini[0]+=1
                 else:
                     node_positions[node] = ((get_or_set_node_position(node[0]) + get_or_set_node_position(node[1]))/2, branch_times[node])
 

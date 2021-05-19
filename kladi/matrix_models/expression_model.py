@@ -10,12 +10,13 @@ from tqdm import tqdm
 import warnings
 
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel, logger
+from kladi.matrix_models.scipm_base import BaseModel
 import configparser
 import requests
 import json
 from itertools import zip_longest
 import matplotlib.pyplot as plt
+import logging
 
 config = configparser.ConfigParser()
 config.read('kladi/matrix_models/config.ini')
@@ -41,7 +42,7 @@ class GeneDevianceModel:
 
     def fit(self, y_ij):
 
-        logger.info('Learning deviance featurization for transcript counts ...')
+        logging.info('Learning deviance featurization for transcript counts ...')
         self.pi_j_hat = y_ij.sum(axis = 0)/y_ij.sum()
 
         return self
@@ -129,8 +130,8 @@ class ExpressionModel(BaseModel):
         testing_loss = []
         for K in num_modules:
             assert(isinstance(K, int) and K > 0)
-            logger.info('Training model with {} modules ...'.format(str(K)))
-            logger.info('----------------------------------')
+            logging.info('Training model with {} modules ...'.format(str(K)))
+            logging.info('----------------------------------')
             test_model = cls(genes, num_modules=K, initial_counts = initial_counts, dropout=dropout, hidden=hidden, use_cuda=use_cuda)
             test_model.fit(counts, num_epochs = num_epochs, batch_size = batch_size, learning_rate = learning_rate, eval_every = eval_every, 
                 test_proportion = test_proportion, use_validation_set = True)
@@ -292,7 +293,7 @@ class ExpressionModel(BaseModel):
             'list': (None, top_genes),
         }
 
-        logger.info('Querying Enrichr with module {} genes.'.format(str(module_num)))
+        logging.info('Querying Enrichr with module {} genes.'.format(str(module_num)))
         response = requests.post(enrichr_url + post_endpoint, files=payload)
         if not response.ok:
             raise Exception('Error analyzing gene list')
@@ -318,7 +319,7 @@ class ExpressionModel(BaseModel):
 
     def get_enrichments(self, list_id):
 
-        logger.info('Downloading results ...')
+        logging.info('Downloading results ...')
 
         enrichments = {
             ontology : self.get_ongology(list_id, ontology=ontology)

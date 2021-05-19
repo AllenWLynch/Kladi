@@ -19,10 +19,12 @@ import matplotlib.colors as pltcolors
 from umap import UMAP
 import logging
 
-from kladi.pseudotime.plot_utils import Beeswarm
+from kladi.pseudotime.plot_utils import Beeswarm, map_colors, plot_umap
 from kladi.pseudotime.lineage_tree import LineageTree
 from matplotlib import cm
+from matplotlib.patches import Patch
 from matplotlib.colors import Normalize
+from math import ceil
 
 logging.basicConfig(level = logging.INFO)
 logger = logging.Logger('kladi.palantir')
@@ -113,7 +115,9 @@ class PalantirTrajectoryInference:
         return self.eigspace
 
     def _get_waypoints(self, early_cell, n_waypoints = 1200, 
-        terminal_states = None, use_early_cell_as_start = False):
+        terminal_states = None, use_early_cell_as_start = False, seed = 2556):
+
+        np.random.seed(seed=seed)
 
         assert(isinstance(early_cell, int) and early_cell >= 0 and early_cell < len(self.cell_features))
         assert(isinstance(n_waypoints, int) and n_waypoints > 0)
@@ -270,9 +274,8 @@ class PalantirTrajectoryInference:
 
         return pseudotime
 
-    def _construct_directed_chain(self):
+    def get_directed_knn_graph(self):
 
-        # Markov chain construction
         try:
             self.pseudotime
         except AttributeError:
@@ -300,6 +303,13 @@ class PalantirTrajectoryInference:
 
         # Update adjacecy matrix    
         kNN[x, ind[x,y]] = 0
+
+        return kNN, adaptive_std
+
+    def _construct_directed_chain(self):
+
+        # Markov chain construction
+        kNN, adaptive_std = self.get_directed_knn_graph()
 
         # Affinity matrix and markov chain
         i,j,d = sparse.find(kNN)
@@ -366,7 +376,13 @@ class PalantirTrajectoryInference:
         
         return start_prob*adaptive_scale + start_prob
 
-    def get_lineages(self, stretch = 10):
+    def get_lineages(self, stretch = 10, shift=0.8):
+        
+        assert(isinstance(stretch, float) and stretch > 0)
+        assert(isinstance(shift, (float, int)) and shift > 0 and shift < 1)
+
+        self.stretch = stretch
+        self.shift = shift
 
         try:
             self.branch_probs
@@ -377,7 +393,7 @@ class PalantirTrajectoryInference:
         for lineage_num, lineage_probs in enumerate(self.branch_probs.T):
 
             threshold = self.adaptive_threshold(self.pseudotime, lineage_probs[self.start_cell], 
-                    self.terminal_states[lineage_num], stretch = stretch)
+                    self.terminal_states[lineage_num], stretch = stretch, shift = shift)
 
             lineages.append((lineage_probs >= threshold)[:, np.newaxis])
 
@@ -466,7 +482,8 @@ class PalantirTrajectoryInference:
                 downstream_cells = self.lineages[:, downstream_lineages].sum(-1)
                 
                 lineage_probability_thresholds = np.hstack([
-                    self.adaptive_threshold(self.pseudotime, self.branch_probs[self.start_cell, lin], self.terminal_states[lin])[:, np.newaxis]
+                    self.adaptive_threshold(self.pseudotime, self.branch_probs[self.start_cell, lin], self.terminal_states[lin],
+                        stretch=self.stretch, shift=self.shift)[:, np.newaxis]
                     for lin in downstream_lineages
                 ])
 
@@ -481,7 +498,7 @@ class PalantirTrajectoryInference:
                     state_ratios[assign_cells] = prob_lineage_ratio[assign_cells]
                     states[states_assigned] = (split, split[i])
 
-        return cell_states, states
+        return cell_states.astype(np.int32), states
 
     def get_graphviz_tree(self, earliness_shift = 0.33):
         
@@ -503,18 +520,70 @@ class PalantirTrajectoryInference:
 
         return self.representation
 
-    def plot_lineages(self, data_representation = None, ax = None):
-        pass
+    def check_representation(self, data_representation):
 
-    def plot_trajectory_velocity(self, data_representation = None, ax = None):
-        pass
+        if data_representation is None:
+            try:
+                data_representation = self.representation
+            except AttributeError:
+                raise Exception('User must use "get_visual_representation" to get 2D representation of data for plotting. Adjust the "continuity" parameter for smoother trajectories. Or, you can pass your own (num cells x 2) representation.')
 
-    def plot_swarm_tree(self, cell_colors = None, label = None, palette = None, show_cbar = True,
-        size = 1, vmin = None, vmax = None, log_pseudotime = True, figsize = (20,10)):
+        else:
+            assert(isinstance(data_representation, np.ndarray))
+            assert(len(data_representation.shape) == 2)
+            assert(data_representation.shape[-1] >= 2)
 
-        fig, ax = plt.subplots(1,1,figsize=figsize)
+        return data_representation
+
+    def plot_lineages(self, data_representation = None, lineages_per_row = 4, aspect = 2, 
+        height = 2, return_fig = False, size = 2, palette = 'viridis'):
+        try:
+            self.lineages
+        except AttributeError:
+            raise Exception('User must use "get_lineages" to calculate lineages before plotting them!')
+
+        data_representation = self.check_representation(data_representation)
+        
+        assert(isinstance(size, int))
+
+        num_lineages = self.lineages.shape[-1]
+        num_rows = ceil(num_lineages/lineages_per_row)
+
+        fig, ax = plt.subplots(num_rows, lineages_per_row, figsize = (height*aspect*lineages_per_row, height*num_rows))
+        ax=ax.ravel()
+
+        for i, ax_i in enumerate(ax):
+
+            if i >= self.lineages.shape[-1]:
+                ax_i.axis('off')
+
+            else:
+                lineage = self.lineages[:,i]
+                name = self.lineage_names[i]
+                
+                ax_i.scatter(x = data_representation[lineage,0], y = data_representation[lineage,1], 
+                    c = self.branch_probs[lineage, i], vmin = 0, vmax = 1, cmap = palette, s = size)
+
+                ax_i.scatter(x = data_representation[~lineage,0], y = data_representation[~lineage,1], 
+                    c = 'lightgrey', s = size)
+
+                ax_i.set(title = str(name))
+                ax_i.axis('off')
+
+        fig.colorbar(cm.ScalarMappable(Normalize(0, 1), cmap=palette), ax=ax, anchor = (1, 0.5), aspect = 15,
+            location = 'right', pad = 0.01, shrink = 0.5, label = 'Prob( Reaches Terminal State )')
+
+        if return_fig:
+            return fig, ax
+
+
+    def plot_swarm_tree(self, cell_colors = None, title = None, palette = 'viridis', show_legend = True,
+        size = 4, log_pseudotime = True, figsize = (20,10), max_swarm_size = 1500, ax = None, hue_order = None):
 
         cell_states, state_nodes = self.get_cell_tree_states()
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize=figsize)
 
         tree_layout = self._greedy_node_merge().get_tree_layout()
 
@@ -526,55 +595,219 @@ class PalantirTrajectoryInference:
         if cell_colors is None:
             cell_colors = cm.get_cmap('Set3')(cell_states.astype(int))
         else:
+            
             assert(isinstance(cell_colors, np.ndarray))
+            cell_colors = np.ravel(cell_colors)
+            assert(len(cell_colors) == len(pseudotime))
 
-            if np.issubdtype(cell_colors.dtype, np.number):
-
-                vmin = cell_colors.min()
-                vmax = cell_colors.max()
-
-                #sort so higher values are on top
-                color_order = np.argsort(cell_colors)
-                cell_states, cell_colors, pseudotime = cell_states[color_order], cell_colors[color_order], pseudotime[color_order]
-
-                if show_cbar:
-                    fig.colorbar(cm.ScalarMappable(Normalize(vmin, vmax), cmap=palette), ax=ax, location = 'left', pad = 0.01, shrink = 0.25)
+            cell_colors = map_colors(ax, cell_colors, palette, 
+                add_legend = show_legend, hue_order = hue_order, 
+                cbar_kwargs = dict(orientation = 'vertical', pad = 0.01, shrink = 0.25, aspect = 15, anchor = (0, 0.5)),
+                legend_kwargs = dict(loc="center left", markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large',
+                            bbox_to_anchor=(1.05, 0.5)))
 
         if size is None:
             size = np.ones_like(cell_states)
         elif isinstance(size, int):
             size = np.ones_like(cell_states) * size
         
-        for state_idx, (start_node, end_node) in state_nodes.items():
+        highest_centerline = -1
+
+        for state_idx, (start_node, end_node) in list(state_nodes.items())[::-1]:
+
+            segment_time_start = tree_layout[start_node][1] if not start_node is "Root" else 0
+            if log_pseudotime:
+                segment_time_start = np.log2(segment_time_start + 1)
 
             centerline = tree_layout[end_node][0]
+            highest_centerline = max(centerline, highest_centerline)
+
             cell_mask = cell_states==state_idx
 
-            x = pseudotime[cell_mask]
+            if cell_mask.sum() > max_swarm_size:
+                cell_mask = np.random.choice(np.argwhere(cell_mask)[:,0], max_swarm_size, replace = False)
 
-            points = ax.scatter(x, np.ones_like(x) * centerline, s = size[cell_mask], cmap = palette, vmin = vmin, vmax = vmax, c = cell_colors[cell_mask])
+            x = pseudotime[cell_mask]
+            points = ax.scatter(x, np.ones_like(x) * centerline, s = size[cell_mask], c = cell_colors[cell_mask])
             
-            Beeswarm(orient='h')(points, centerline)
+            Beeswarm(orient='h', width = 0.9)(points, centerline)
             
             if not start_node is "Root":
-                #print(tree_layout[start_node][0], centerline)
-                ax.plot([np.log2(tree_layout[start_node][1] + 1)]*2,
+                ax.plot([segment_time_start]*2,
                         (tree_layout[start_node][0],centerline), color = 'black')
-                
-            plt.axis('off')
 
             if isinstance(end_node, int):
                 ax.text(x.max()*1.05, centerline, str(self.lineage_names[end_node]), fontsize='large')
 
+        ax.axis('off')
+        ax.set(ylim = (-0.5, highest_centerline + 0.75))
+
+        if not title is None:
+            ax.set_title(str(title), fontdict= dict(fontsize = 'x-large'))
+
+        return ax
+
+    def plot_pseudotime(self, data_representation = None, figsize = (10,5), palette = 'viridis', size = 2, ax = None):
+        try:
+            self.pseudotime
+        except AttributeError:
+            raise Exception('User must run "get_pseudotime" before this function.')
+
+        data_representation = self.check_representation(data_representation)
+        
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=figsize)
+
+        ax.scatter(data_representation[:,0], data_representation[:,1], c = self.pseudotime, s = size, cmap = palette)
+        fig.colorbar(cm.ScalarMappable(Normalize(self.pseudotime.min(), self.pseudotime.max()), cmap=palette), ax=ax, 
+            location = 'left', pad = 0.01, shrink = 0.25, aspect = 15, label = 'Pseudotime')
+
+        ax.axis('off')
+
+        return ax
+
+    def plot_states(self, data_representation = None, figsize = (10,5), palette = 'Set3', size = 2, ax = None):
+        
+        cell_states, state_nodes = self.get_cell_tree_states()
+        #cell_states = cell_states.astype(int)
+        data_representation = self.check_representation(data_representation)
+        assert(isinstance(size, int))
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize=figsize)
+
+        lin_tree = LineageTree(self.lineage_names)
+
+        legend_labels = {}
+        for state_idx, (start_node, end_node) in state_nodes.items():
+            legend_labels[state_idx] = lin_tree.get_node_name(end_node) 
+
+        sorted_by_multipotency = sorted(list(state_nodes.items()), key = lambda x : len(str(x).split(',')))[::-1]
+        for i, (state, node) in enumerate(sorted_by_multipotency):
+            ax.scatter(x = data_representation[cell_states == state,0], y = data_representation[cell_states == state,1], color = cm.get_cmap(palette)(i), 
+                    s = size, label = legend_labels[state])
+
+        ax.axis('off')
+        ax.legend(loc="center left", title="Possible Terminal States", markerscale = 5, frameon = False, title_fontsize='x-large', fontsize='large',
+                bbox_to_anchor=(1.05, 0.5))
+
+        return ax
+
+    def plot_feature_stream(self, features, labels = None, color = 'black', log_pseudotime = True, figsize = (20,10),
+        scale_features = True, center_baseline = True, bin_size = 25, palette = 'Set3', ax=None, title = None, show_legend = True):
+
+        assert(isinstance(features, np.ndarray))
+        assert(len(features) == len(self.cell_features))
+        if len(features.shape) == 1:
+            features = features[:,np.newaxis]
+        assert(len(features.shape) == 2)
+        assert(np.issubdtype(features.dtype, np.number))
+        num_features = features.shape[-1]
+
+        if labels is None:
+            labels = list(range(num_features))
+        else:
+            assert(len(labels) == num_features)
+
+        cell_states, state_nodes = self.get_cell_tree_states()
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize=figsize)
+
+        tree_layout = self._greedy_node_merge().get_tree_layout()
+
+        if log_pseudotime:
+            pseudotime = np.log2(self.pseudotime+1)
+        else:
+            pseudotime = self.pseudotime
+
+        highest_centerline = -1
+        if scale_features:
+            features = minmax_scale(features)
+        else:
+            features = features-features.min(0, keepdims=True) #just make sure no vals are negative
+        
+        features = features/(features.sum(-1).max()) * 0.8
+            
+        for state_idx, (start_node, end_node) in list(state_nodes.items())[::-1]:
+
+            segment_time_start = tree_layout[start_node][1] if not start_node is "Root" else 0
+            if log_pseudotime:
+                segment_time_start = np.log2(segment_time_start + 1)
+
+            centerline = tree_layout[end_node][0]
+            highest_centerline = max(centerline, highest_centerline)
+
+            cell_mask = cell_states==state_idx
+
+            x = pseudotime[cell_mask]
+            #bin x on # of cells
+            cell_order = np.argsort(x)
+            x = x[cell_order]
+            bin_num = np.arange(len(x))//bin_size
+
+            segment_feature = features[cell_mask][cell_order]
+            
+            bin_means, bin_time = [],[]
+            for _bin in range(bin_num.max()+1):
+                bin_means.append(np.mean(segment_feature[bin_num == _bin], axis = 0))
+                if _bin == 0:
+                    bin_time.append(segment_time_start)
+                elif _bin == bin_num.max():
+                    bin_time.append(x.max())
+                else:
+                    bin_time.append(x[_bin * bin_size])
+
+            bin_means = np.vstack(bin_means)
+            bin_time = np.array(bin_time)
+            
+            bin_means = np.cumsum(bin_means, axis=-1)
+            
+            if center_baseline:
+                baseline_adjustment = bin_means[:,-1]/4
+            else:
+                baseline_adjustment = np.zeros(bin_means.shape[0])
+                
+            for i in np.arange(num_features)[::-1]:
+                feature_mean = bin_means[:,i]
+                color = cm.get_cmap(palette)(i) if num_features > 1 else color
+
+                ax.fill_between(bin_time, feature_mean - baseline_adjustment + centerline, 
+                    centerline - baseline_adjustment, color = color)
+            
+            if not start_node is "Root":
+                if centerline > tree_layout[start_node][0]:
+                    end_connection_line = bin_means[0,-1] - baseline_adjustment[0] + centerline
+                else:
+                    end_connection_line = centerline - baseline_adjustment[0]
+                ax.plot([segment_time_start]*2,
+                        (tree_layout[start_node][0], end_connection_line), color = 'black')
+
+        ax.axis('off')
+
+        if isinstance(end_node, int):
+            ax.text(x.max() * 1.05, centerline, str(self.lineage_names[end_node]), fontsize='large')
+
         plt.tight_layout()
+        ax.set(ylim = (-0.5, highest_centerline + 0.75))
 
-        if not label is None:
-            ax.set(title = str(label))
+        if not title is None:
+            ax.set_title(str(title), fontdict= dict(fontsize = 'x-large'))
 
-        return fig
+        if show_legend and num_features > 1:
+            legend_params = dict(loc="center left", markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large',
+                                bbox_to_anchor=(1.05, 0.5))
+            ax.legend(handles = [
+                            Patch(color = cm.get_cmap(palette)(i), label = str(label)) for i,label in enumerate(labels)
+                        ], **legend_params)
 
-    def plot_pseudotime(self, data_representation = None, ax = None):
-        pass
+        return ax
 
-    def plot_states(self, data_representation = None, ax = None):
-        pass
+
+    def plot_umap(self, hue, data_representation = None, palette = 'viridis', projection = '2d', ax = None, figsize= (10,5),
+        show_legend = True, hue_order = None, size = 2, title = None):
+
+        data_representation = self.check_representation(data_representation)
+
+        plot_umap(data_representation, hue, palette = palette, projection = projection, ax = ax, figsize = figsize, 
+            add_legend = show_legend, hue_order = hue_order, size = size, title = None)

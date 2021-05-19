@@ -16,10 +16,6 @@ from pyro.infer import Predictive
 import logging
 import pickle
 
-logging.basicConfig(level = logging.INFO)
-logger = logging.Logger('kladi.scIPM')
-logger.setLevel(logging.INFO)
-
 class BaseModel(nn.Module):
 
     encoder_features_index = 1
@@ -43,7 +39,7 @@ class BaseModel(nn.Module):
         self.encoder = encoder_model(num_features, num_topics, hidden, dropout)
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
-        logger.info('Using CUDA: {}'.format(str(self.use_cuda)))
+        logging.info('Using CUDA: {}'.format(str(self.use_cuda)))
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.to(self.device)
         self.max_prob = torch.tensor([0.99999], requires_grad = False).to(self.device)
@@ -102,7 +98,7 @@ class BaseModel(nn.Module):
         self.set_device('cpu')
 
     def set_device(self, device):
-        logger.info('Moving model to device: {}'.format(device))
+        logging.info('Moving model to device: {}'.format(device))
         self.device = device
         self.to(self.device)
 
@@ -144,26 +140,26 @@ class BaseModel(nn.Module):
         # set numpy random seed
 
         pyro.clear_param_store()
-        logger.info('Validating data ...')
+        logging.info('Validating data ...')
 
         X = self._validate_data(X)
         n_observations = X.shape[0]
 
-        logger.info('Initializing model ...')
+        logging.info('Initializing model ...')
 
         adam_params = {"lr": 1e-3}
         optimizer = Adam(adam_params)
         self.svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
 
         if use_validation_set:
-            logger.warn('Using hold-out set of cells for validation loss. When computing your final model, set "use_validation_set" to False so that all cells are used in computaiton of latent variables. This ensures that holdout-set cells\' latent variables do not have different quality/distribution from train-set cells')
+            logging.warn('Using hold-out set of cells for validation loss. When computing your final model, set "use_validation_set" to False so that all cells are used in computaiton of latent variables. This ensures that holdout-set cells\' latent variables do not have different quality/distribution from train-set cells')
             test_set = np.random.rand(n_observations) < test_proportion
-            logger.info("Training with {} cells, testing with {}.".format(str((~test_set).sum()), str(test_set.sum())))
+            logging.info("Training with {} cells, testing with {}.".format(str((~test_set).sum()), str(test_set.sum())))
         else:
             test_set = np.zeros(n_observations).astype(np.bool)
         train_set = ~test_set
 
-        logger.info('Training ...')
+        logging.info('Training ...')
         self.training_loss = []
         self.testing_loss = []
 
@@ -171,23 +167,23 @@ class BaseModel(nn.Module):
         try:
             for epoch in range(1, num_epochs + 1):
                 running_loss = 0.0
-                for batch in self.get_batches(X[train_set], batch_size = batch_size):
+                for batch in self._get_batches(X[train_set], batch_size = batch_size):
                     loss = self.svi.step(*batch)
                     running_loss += loss
                 
                 epoch_loss = running_loss/train_set.sum()
                 self.training_loss.append(epoch_loss)
-                logger.info('Epoch {}/{} complete. Training loss: {:.3e}'.format(str(epoch), str(num_epochs), epoch_loss))
+                logging.info('Epoch {}/{} complete. Training loss: {:.3e}'.format(str(epoch), str(num_epochs), epoch_loss))
 
                 if (epoch % eval_every == 0 or epoch == num_epochs) and test_set.sum() > 0:
                     self.eval()
                     test_loss = self.get_logp(X[test_set])/test_set.sum()
-                    logger.info('Test loss: {:.4e}'.format(test_loss))
+                    logging.info('Test loss: {:.4e}'.format(test_loss))
                     self.train()
                     self.testing_loss.append(test_loss)
 
         except KeyboardInterrupt:
-            logger.error('Interrupted training.')
+            logging.error('Interrupted training.')
 
         self.eval()
         self.set_device('cpu')
