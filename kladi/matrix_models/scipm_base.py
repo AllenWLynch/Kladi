@@ -71,6 +71,12 @@ class BaseModel(nn.Module):
 
         return np.array(batch_loss).sum() #loss is negative log-likelihood
 
+    def _numpy_forward(self, latent_comp):
+
+        activation = (np.dot(latent_comp, self._get_beta()) - self._get_bn_mean())/self._get_bn_var()
+        logit = self._get_gamma() * activation  + self._get_bias()
+
+        return np.exp(logit)/np.exp(logit).sum(-1, keepdims = True)
     
     def _get_beta(self):
         # beta matrix elements are the weights of the FC layer on the decoder
@@ -111,9 +117,10 @@ class BaseModel(nn.Module):
 
         X = self._validate_data(X)
         assert(isinstance(batch_size, int) and batch_size > 0)
-
+        
+        logging.info('Predicting latent variables ...')
         latent_vars = []
-        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size)):
+        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, training = False)):
             latent_vars.append(self._get_latent_MAP(*batch))
 
         theta = np.vstack(latent_vars)
@@ -137,6 +144,7 @@ class BaseModel(nn.Module):
         seed = 2556
         torch.manual_seed(seed)
         pyro.set_rng_seed(seed)
+        np.random.seed(seed)
         # set numpy random seed
 
         pyro.clear_param_store()

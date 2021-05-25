@@ -25,8 +25,8 @@ class LineageTree:
 
     def get_node_name(self, node):
         return ', '.join(map(str, self.lineage_names[self.get_all_leaves_from_node(node)]))
-
-    def get_tree_layout(self):
+    
+    def get_tree_graph(self):
 
         G = nx.DiGraph()
 
@@ -34,6 +34,12 @@ class LineageTree:
             G.add_node(node)
             G.add_edge(node, node[0])
             G.add_edge(node, node[1])
+
+        return G
+
+    def get_tree_layout(self):
+
+        G = self.get_tree_graph()
 
         dfs_tree = list(nx.dfs_predecessors(G, self.get_root()))[::-1] + [self.get_root()]
 
@@ -91,5 +97,16 @@ class LineageTree:
 
         G.layout(prog = 'dot')
         return G
+
+    def get_path_to(self, lineage_name):
+        
+        assert(lineage_name in self.lineage_names)
+        lineage_num = np.argwhere(lineage_name ==self.lineage_names)[0]
+
+        tree = self.get_tree_graph()
+
+        return [self.get_root(), *nx.all_simple_paths(tree, self.get_root(), lineage_num)[0]]
+
+
 
     

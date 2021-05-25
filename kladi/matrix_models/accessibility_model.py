@@ -12,11 +12,12 @@ import warnings
 from scipy import sparse
 from scipy.stats import fisher_exact
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel, logger
+from kladi.matrix_models.scipm_base import BaseModel
 from kladi.motif_scanning import moods_scan
 import configparser
 import requests
 import json
+import logging
 
 
 class DANEncoder(nn.Module):
@@ -131,7 +132,7 @@ class AccessibilityModel(BaseModel):
         
         assert(np.isclose(X.data.astype(np.int64), X.data).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
-        logger.info('Binarizing accessibility matrix ...')
+        logging.info('Binarizing accessibility matrix ...')
         X.data = np.ones_like(X.data)
 
         return X
@@ -157,7 +158,7 @@ class AccessibilityModel(BaseModel):
         return dense_matrix.astype(np.int64)
 
 
-    def _get_batches(self, accessibility_matrix, batch_size = 32):
+    def _get_batches(self, accessibility_matrix, batch_size = 32, training = True):
 
         N = accessibility_matrix.shape[0]
 
@@ -171,7 +172,8 @@ class AccessibilityModel(BaseModel):
 
             rd_batch = read_depth[batch_start:batch_end]
             idx_batch = torch.from_numpy(self._get_padded_idx_matrix(accessibility_matrix[batch_start : batch_end], rd_batch)).to(self.device)
-            onehot_batch = self._get_onehot_tensor(idx_batch)
+
+            onehot_batch = self._get_onehot_tensor(idx_batch) if training else None
 
             yield idx_batch, read_depth[batch_start:batch_end], onehot_batch
 
@@ -218,15 +220,15 @@ class AccessibilityModel(BaseModel):
     def get_top_peaks(self, module_num, top_n = 20000):
         return self.rank_peaks(module_num)[-top_n : ]
 
-    def _batch_impute(self, latent_compositions, batch_size = 32):
+    def _batch_impute(self, latent_compositions, batch_size = 128):
 
         assert(isinstance(latent_compositions, np.ndarray))
         assert(len(latent_compositions.shape) == 2)
         assert(latent_compositions.shape[1] == self.num_topics)
         assert(np.isclose(latent_compositions.sum(-1), 1).all())
 
-        latent_compositions = self.to_tensor(latent_compositions)
-
+        latent_compositions = self._to_tensor(latent_compositions)
+        logging.info('Finding posterior peak probabilities ...')
         for batch_start, batch_end in self._iterate_batch_idx(len(latent_compositions), batch_size, bar = True):
             yield self.decoder(latent_compositions[batch_start:batch_end, :]).cpu().detach().numpy()
 
@@ -269,7 +271,7 @@ class AccessibilityModel(BaseModel):
         assert(isinstance(top_quantile, float) and top_quantile > 0 and top_quantile < 1)
 
         module_idx = self._argsort_peaks(module_num)[-int(self.num_features*top_quantile) : ]
-        logger.info('Finding enrichment in top {} peaks ...'.format(str(len(module_idx))))
+        logging.info('Finding enrichment in top {} peaks ...'.format(str(len(module_idx))))
 
         pvals, test_statistics = [], []
         for i in tqdm(range(hits_matrix.shape[0])):
@@ -291,8 +293,10 @@ class AccessibilityModel(BaseModel):
     def plot_motif_enrichments(enrichment_results):
         pass
 
-
     def get_gene_activity(self, latent_compositions, rp_models):
         
         #for peak_probabilities in self.batch_impute(latent_compositions):
         raise NotImplementedError()
+
+    def learn_rp_models(self,*, genes, raw_expression, read_depth):
+        pass
