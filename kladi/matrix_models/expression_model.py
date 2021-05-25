@@ -37,13 +37,13 @@ def compact_string(x, max_wordlen = 4, join_spacer = ' ', sep = ' '):
 
 class GeneDevianceModel:
 
-    def __init__(self, highly_variable):
-        self.highly_variable = highly_variable
+    def __init__(self):
+        pass
 
     def fit(self, y_ij):
 
         logging.info('Learning deviance featurization for transcript counts ...')
-        self.pi_j_hat = y_ij[:, self.highly_variable].sum(axis = 0)/y_ij.sum()
+        self.pi_j_hat = y_ij.sum(axis = 0)/y_ij.sum()
 
         return self
 
@@ -53,8 +53,6 @@ class GeneDevianceModel:
     def transform(self, y_ij):
 
         n_i = y_ij.sum(axis = 1, keepdims = True)
-
-        y_ij = y_ij[:, self.highly_variable]
 
         mu_ij_hat = n_i * self.pi_j_hat[np.newaxis, :]
 
@@ -109,8 +107,8 @@ class ExpressionDecoder(nn.Module):
     # Base class for the decoder net, used in the model
     def __init__(self, num_genes, num_topics, dropout):
         super().__init__()
-        self.beta = nn.Linear(num_topics, num_genes + 1, bias = False)
-        self.bn = nn.BatchNorm1d(num_genes + 1)
+        self.beta = nn.Linear(num_topics, num_genes, bias = False)
+        self.bn = nn.BatchNorm1d(num_genes)
         self.drop = nn.Dropout(dropout)
         self.fc = nn.Linear(num_topics, num_genes, bias = False)
         self.bn2 = nn.BatchNorm1d(num_genes)
@@ -118,11 +116,10 @@ class ExpressionDecoder(nn.Module):
     def forward(self, latent_composition):
         inputs = self.drop(latent_composition)
         # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1)[:, :-1], self.bn2(self.fc(inputs))
+        return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
 
 
 class ExpressionModel(BaseModel):
-
 
     @classmethod
     def param_search(cls,*,counts, genes, num_modules = [5, 10, 15, 20, 25], initial_counts = 10, dropout = 0.2, hidden = 128, use_cuda = True,
@@ -143,27 +140,13 @@ class ExpressionModel(BaseModel):
 
         return testing_loss
 
-    def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 10, 
+    def __init__(self, genes, num_modules = 15, initial_counts = 10, 
         dropout = 0.2, hidden = 128, use_cuda = True):
 
         assert(isinstance(genes, (list, np.ndarray)))
         
+        self.num_features = len(genes)
         self.genes = np.ravel(np.array(genes))
-
-        if not highly_variable is None:
-            assert(isinstance(highly_variable, (list, np.ndarray)))
-            assert(highly_variable.dtype == bool)
-        else:
-            highly_variable = np.ones_like(genes).astype(bool)
-        
-        self.highly_variable = np.ravel(np.array(highly_variable))
-        assert(len(self.genes) == len(self.highly_variable))
-
-        self.num_features = int(highly_variable.sum())
-        self.input_width = len(highly_variable)
-
-        self.genes = self.genes[highly_variable]
-
         super().__init__(self.num_features, ExpressionEncoder, ExpressionDecoder, num_topics = num_modules, initial_counts = initial_counts, 
             hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
@@ -252,18 +235,21 @@ class ExpressionModel(BaseModel):
         try:
             self.deviance_model
         except AttributeError:
-            self.deviance_model = GeneDevianceModel(self.highly_variable).fit(count_matrix)
+            self.deviance_model = GeneDevianceModel().fit(count_matrix)
 
         for batch_start, batch_end in self._iterate_batch_idx(N, batch_size):
             yield self._featurize(count_matrix[batch_start : batch_end, :])
 
     def _validate_data(self, X):
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
+        
         if isspmatrix(X):
             X = np.array(X.todense())
+
         assert(len(X.shape) == 2)
+        assert(X.shape[1] == self.num_features)
+        
         assert(np.isclose(X.astype(np.int64), X).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
-        assert(X.shape[1] == self.input_width)
 
         return X.astype(np.float32)
 
@@ -299,6 +285,7 @@ class ExpressionModel(BaseModel):
         self.set_device('cpu')
         #self.genes = state['genes']
 
+
     def _featurize(self, count_matrix):
 
         encoded_counts = self.deviance_model.transform(count_matrix)
@@ -306,7 +293,7 @@ class ExpressionModel(BaseModel):
 
         encoded_counts = np.hstack([encoded_counts, np.log(read_depth)])
 
-        return self._to_tensor(count_matrix[:, self.highly_variable].copy()), self._to_tensor(encoded_counts), self._to_tensor(read_depth)
+        return self._to_tensor(count_matrix), self._to_tensor(encoded_counts), self._to_tensor(read_depth)
 
     def rank_genes(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
