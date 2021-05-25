@@ -241,6 +241,10 @@ class RPModeler(FromRegions):
         
         return state_knockout_scores
 
+    def covariance_isd(self, gene_models, pseudotime_model, bin_size = 100):
+
+        pass
+
 
 
 class PyroRPVI(PyroModule):

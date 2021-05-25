@@ -37,10 +37,12 @@ def compact_string(x, max_wordlen = 4, join_spacer = ' ', sep = ' '):
 
 class GeneDevianceModel:
 
-    def __init__(self):
-        pass
+    def __init__(self, highly_variable):
+        self.highly_variable = highly_variable
 
     def fit(self, y_ij):
+        
+        y_ij = y_ij[:, self.highly_variable]
 
         logging.info('Learning deviance featurization for transcript counts ...')
         self.pi_j_hat = y_ij.sum(axis = 0)/y_ij.sum()
@@ -51,7 +53,9 @@ class GeneDevianceModel:
         self.pi_j_hat = pi
 
     def transform(self, y_ij):
-
+        
+        y_ij = y_ij[:, self.highly_variable]
+        
         n_i = y_ij.sum(axis = 1, keepdims = True)
 
         mu_ij_hat = n_i * self.pi_j_hat[np.newaxis, :]
@@ -140,14 +144,29 @@ class ExpressionModel(BaseModel):
 
         return testing_loss
 
-    def __init__(self, genes, num_modules = 15, initial_counts = 10, 
+    def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 10, 
         dropout = 0.2, hidden = 128, use_cuda = True):
 
         assert(isinstance(genes, (list, np.ndarray)))
-        
-        self.num_features = len(genes)
         self.genes = np.ravel(np.array(genes))
-        super().__init__(self.num_features, ExpressionEncoder, ExpressionDecoder, num_topics = num_modules, initial_counts = initial_counts, 
+        self.num_genes = len(self.genes)
+
+        if highly_variable is None:
+            highly_variable = np.ones_like(genes)
+        else:
+            assert(isinstance(highly_variable, np.ndarray))
+            assert(highly_variable.dtype == bool)
+            
+            highly_variable = np.ravel(highly_variable)
+            assert(len(highly_variable) == self.num_genes)
+            self.highly_variable = highly_variable
+
+        self.num_features = int(highly_variable.sum())
+        
+        super().__init__(self.num_features, 
+            ExpressionEncoder(self.num_features, num_modules, hidden, dropout), 
+            ExpressionDecoder(self.num_genes, num_modules, dropout), 
+            num_topics = num_modules, initial_counts = initial_counts, 
             hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
         
@@ -155,7 +174,7 @@ class ExpressionModel(BaseModel):
 
         pyro.module("decoder", self.decoder)
 
-        dispersion = pyro.param("dispersion", torch.tensor(5.).to(self.device) * torch.ones(self.num_features).to(self.device), 
+        dispersion = pyro.param("dispersion", torch.tensor(5.).to(self.device) * torch.ones(self.num_genes).to(self.device), 
             constraint = constraints.positive)
         
         with pyro.plate("cells", encoded_expr.shape[0]):
@@ -235,7 +254,7 @@ class ExpressionModel(BaseModel):
         try:
             self.deviance_model
         except AttributeError:
-            self.deviance_model = GeneDevianceModel().fit(count_matrix)
+            self.deviance_model = GeneDevianceModel(self.highly_variable).fit(count_matrix)
 
         for batch_start, batch_end in self._iterate_batch_idx(N, batch_size):
             yield self._featurize(count_matrix[batch_start : batch_end, :])
@@ -247,7 +266,7 @@ class ExpressionModel(BaseModel):
             X = np.array(X.todense())
 
         assert(len(X.shape) == 2)
-        assert(X.shape[1] == self.num_features)
+        assert(X.shape[1] == self.num_genes)
         
         assert(np.isclose(X.astype(np.int64), X).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
@@ -280,7 +299,7 @@ class ExpressionModel(BaseModel):
         self.load_state_dict(state['state'])
         self.eval()       
 
-        self.deviance_model = GeneDevianceModel()
+        self.deviance_model = GeneDevianceModel(self.highly_variable)
         self.deviance_model.set_pi(state['deviance_pi'])
         self.set_device('cpu')
         #self.genes = state['genes']
@@ -310,8 +329,9 @@ class ExpressionModel(BaseModel):
 
         gene_idx = np.argwhere(self.genes == gene)[0]
         return list(sorted(zip(range(self.num_topics), self._get_beta()[:, gene_idx]), key = lambda x : x[1]))
-
-
+    
+    def _get_beta(self):
+        return super()._get_beta()[:, :-1]
 
     def post_genelist(self, module_num, top_n_genes = 200):
 

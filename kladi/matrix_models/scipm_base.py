@@ -35,8 +35,8 @@ class BaseModel(nn.Module):
 
         self.num_features = num_features
         self.num_topics = num_topics
-        self.decoder = decoder_model(num_features, num_topics, dropout)
-        self.encoder = encoder_model(num_features, num_topics, hidden, dropout)
+        self.decoder = decoder_model
+        self.encoder = encoder_model
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
         logging.info('Using CUDA: {}'.format(str(self.use_cuda)))
