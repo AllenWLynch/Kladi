@@ -306,7 +306,7 @@ class ExpressionModel(BaseModel):
 
         encoded_counts = np.hstack([encoded_counts, np.log(read_depth)])
 
-        return self._to_tensor(count_matrix[:, self.highly_variable].copy()), self._to_tensor(encoded_counts), self._to_tensor(read_depth)
+        return self._to_tensor(count_matrix[:, self.highly_variable].copy()), self._to_tensor(encoded_counts.copy()), self._to_tensor(read_depth)
 
     def rank_genes(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
@@ -323,8 +323,9 @@ class ExpressionModel(BaseModel):
 
         gene_idx = np.argwhere(self.genes == gene)[0]
         return list(sorted(zip(range(self.num_topics), self._get_beta()[:, gene_idx]), key = lambda x : x[1]))
-
-
+    
+    def _get_beta(self):
+        return super()._get_beta()[:, :-1]
 
     def post_genelist(self, module_num, top_n_genes = 200):
 
