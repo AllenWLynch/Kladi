@@ -75,7 +75,10 @@ class AccessibilityModel(BaseModel):
         
         self.num_features = len(peaks)
         self.peaks = np.array(peaks)
-        super().__init__(self.num_features, DANEncoder, Decoder, num_topics = num_modules, initial_counts = initial_counts, 
+        super().__init__(self.num_features, 
+            DANEncoder(self.num_features, num_modules, hidden, dropout), 
+            Decoder(self.num_features, num_modules, dropout), 
+            num_topics = num_modules, initial_counts = initial_counts, 
             hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
 
