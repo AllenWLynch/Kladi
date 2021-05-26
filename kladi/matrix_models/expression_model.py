@@ -159,14 +159,14 @@ class ExpressionModel(BaseModel):
         self.num_genes = len(self.genes)
 
         if highly_variable is None:
-            highly_variable = np.ones_like(genes)
+            highly_variable = np.ones_like(genes).astype(bool)
         else:
             assert(isinstance(highly_variable, np.ndarray))
             assert(highly_variable.dtype == bool)
             
             highly_variable = np.ravel(highly_variable)
             assert(len(highly_variable) == self.num_genes)
-            self.highly_variable = highly_variable
+        self.highly_variable = highly_variable
 
         self.num_features = int(highly_variable.sum())
         

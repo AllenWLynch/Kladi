@@ -228,10 +228,7 @@ class AccessibilityModel(BaseModel):
 
     def _batch_impute(self, latent_compositions, batch_size = 128):
 
-        assert(isinstance(latent_compositions, np.ndarray))
-        assert(len(latent_compositions.shape) == 2)
-        assert(latent_compositions.shape[1] == self.num_topics)
-        assert(np.isclose(latent_compositions.sum(-1), 1).all())
+        self._check_latent_vars(latent_compositions)
 
         latent_compositions = self._to_tensor(latent_compositions)
         logging.info('Finding posterior peak probabilities ...')

@@ -59,6 +59,13 @@ class BaseModel(nn.Module):
     def _get_batches(self, *args, batch_size = 32, bar = True):
         raise NotImplementedError()
 
+    def _check_latent_vars(self, latent_compositions):
+        
+        assert(isinstance(latent_compositions, np.ndarray))
+        assert(len(latent_compositions.shape) == 2)
+        assert(latent_compositions.shape[1] == self.num_topics)
+        assert(np.isclose(latent_compositions.sum(-1), 1).all())
+
     def _get_logp(self, X, batch_size = 32):
         
         X = self._validate_data(X)
