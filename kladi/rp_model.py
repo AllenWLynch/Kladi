@@ -129,15 +129,23 @@ class RPModeler(FromRegions):
             region_mask = region_mask
         )
 
+    def _get_latent_vars(self, model, latent_comp = None, matrix = None):
+
+        assert(not latent_comp is None or not matrix is None)
+
+        if latent_comp is None:
+            latent_compositions = model.predict(matrix)
+        else:
+            latent_compositions = latent_comp
+            model._check_latent_vars(latent_compositions)
+
+        return latent_compositions.copy()
+
     def add_accessibility_params(self, gene_models, accessibility = None, latent_compositions = None):
         logging.info('Adding peak accessibility to models ...')
 
-        if latent_compositions is None:
-            latent_compositions = self.accessibility_model.predict(accessibility)
-        else:
-            assert(isinstance(latent_compositions, np.ndarray)) 
-
-        latent_compositions = latent_compositions.copy()
+        latent_compositions = self._get_latent_vars(self.accessibility_model, matrix = accessibility,
+            latent_comp= latent_compositions)
 
         for imputed_peaks in self.accessibility_model._batch_impute(latent_compositions):
             for model in gene_models:
@@ -157,9 +165,6 @@ class RPModeler(FromRegions):
 
     def train(self, gene_symbols, raw_expression, accessibility_matrix = None, 
         accessibility_latent_compositions = None, iters = 150):
-        
-        assert(not accessibility_latent_compositions is None or not accessibility_matrix is None)
-        assert(raw_expression.shape[0] == (accessibility_matrix.shape[0] if accessibility_latent_compositions is None else accessibility_latent_compositions.shape[0]))
 
         gene_models = []
         for symbol in gene_symbols:
@@ -179,15 +184,7 @@ class RPModeler(FromRegions):
 
     def predict(self, gene_models, accessibility_matrix = None, accessibility_latent_compositions = None):
 
-        assert(not accessibility_latent_compositions is None or not accessibility_matrix is None)
-
-        if accessibility_latent_compositions is None:
-            latent_compositions = self.accessibility_model.predict(accessibility_matrix)
-        else:
-            latent_compositions = accessibility_latent_compositions
-            assert(isinstance(latent_compositions, np.ndarray))
-
-        latent_compositions = latent_compositions.copy()
+        latent_compositions = self._get_latent_vars(self.accessibility_model, accessibility_latent_compositions, accessibility_matrix)
 
         batch_predictions = []
         for imputed_peaks in self.accessibility_model._batch_impute(latent_compositions):
@@ -241,9 +238,29 @@ class RPModeler(FromRegions):
         
         return state_knockout_scores
 
-    def covariance_isd(self, gene_models, pseudotime_model, bin_size = 100):
+    def covariance_isd(self,*,gene_models, pseudotime_model, raw_expression = None, expression_latent_compositions = None,
+        accessibility_matrix = None, accessibility_latent_compositions = None, bin_size = 100):
 
-        pass
+        try:
+            self.accessibility_model.motif_hits
+        except AttributeError:
+            raise Exception('User must run "get_motif_hits_in_peaks" using accessibility model before running this function.')
+
+        atac_latent_compositions = self._get_latent_vars(self.accessibility_model, accessibility_latent_compositions, accessibility_matrix)
+        expression_latent_compositions = self._get_latent_vars(self.expression_model, expression_latent_compositions, raw_expression)
+
+        state_idx, tree_position, bin_masks = list(zip(*pseudotime_model._iterate_all_bins(bin_size = bin_size)))
+
+        atac_bins, expr_bins = [],[]
+
+        for bin_mask in bin_masks:
+            atac_bins = atac_latent_compositions[bin_mask].mean(0, keepdims = True)
+            expr_bins = expression_latent_compositions[bin_mask].mean(0, keepdims = True)
+
+        atac_bins, expr_bins = np.vstack(atac_bins), np.vstack(expr_bins)
+
+        ISD_scores = self.insilico_deletion(gene_models, )
+        
 
 
 
