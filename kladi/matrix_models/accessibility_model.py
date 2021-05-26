@@ -68,16 +68,19 @@ class Decoder(nn.Module):
 class AccessibilityModel(BaseModel):
 
     def __init__(self, peaks, num_modules = 15, initial_counts = 10, 
-        dropout = 0.2, hidden = 128, use_cuda = True):
+        dropout = 0.2, decoder_dropout = None, hidden = 128, use_cuda = True):
 
         assert(isinstance(peaks, (list, np.ndarray)))
         assert(len(peaks.shape) == 2)
+
+        if decoder_dropout is None:
+            decoder_dropout = 1 - (1-dropout)**2
         
         self.num_features = len(peaks)
         self.peaks = np.array(peaks)
         super().__init__(self.num_features, 
             DANEncoder(self.num_features, num_modules, hidden, dropout), 
-            Decoder(self.num_features, num_modules, dropout), 
+            Decoder(self.num_features, num_modules, decoder_dropout), 
             num_topics = num_modules, initial_counts = initial_counts, 
             hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
