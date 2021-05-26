@@ -82,11 +82,9 @@ class ExpressionEncoder(nn.Module):
     # Base class for the encoder net, used in the guide
     def __init__(self, num_genes, num_topics, hidden, dropout):
         super().__init__()
-        self.drop0 = nn.Dropout(dropout)
         self.drop = nn.Dropout(dropout)  # to avoid component collapse
         self.fc1 = nn.Linear(num_genes + 1, hidden)
         self.fc2 = nn.Linear(hidden, hidden)
-        self.fc3 = nn.Linear(hidden, hidden)
         self.fcmu = nn.Linear(hidden, num_topics)
         self.fclv = nn.Linear(hidden, num_topics)
         self.fcrd = nn.Linear(hidden, 2)
@@ -96,10 +94,8 @@ class ExpressionEncoder(nn.Module):
 
     def forward(self, inputs):
         h = F.relu(self.fc1(inputs))
-        h = self.drop0(h)
         h = F.relu(self.fc2(h))
         h = self.drop(h)
-        h = F.relu(self.fc3(h))
         # μ and Σ are the outputs
         theta_loc = self.bnmu(self.fcmu(h))
         theta_scale = self.bnlv(self.fclv(h))
@@ -124,7 +120,7 @@ class ExpressionDecoder(nn.Module):
     def forward(self, latent_composition):
         inputs = self.drop(latent_composition)
         # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
+        return F.softmax(self.bn(self.beta(self.drop(inputs))), dim=1), self.bn2(self.fc(inputs))
 
 
 class ExpressionModel(BaseModel):
@@ -149,10 +145,7 @@ class ExpressionModel(BaseModel):
         return testing_loss
 
     def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 10, 
-        dropout = 0.2, decoder_dropout = None, hidden = 128, use_cuda = True):
-
-        if decoder_dropout is None:
-            decoder_dropout = 1 - (1-dropout)**2
+        dropout = 0.2, hidden = 128, use_cuda = True):
 
         assert(isinstance(genes, (list, np.ndarray)))
         self.genes = np.ravel(np.array(genes))
@@ -172,7 +165,7 @@ class ExpressionModel(BaseModel):
         
         super().__init__(self.num_features, 
             ExpressionEncoder(self.num_features, num_modules, hidden, dropout), 
-            ExpressionDecoder(self.num_genes, num_modules, decoder_dropout), 
+            ExpressionDecoder(self.num_genes, num_modules, dropout), 
             num_topics = num_modules, initial_counts = initial_counts, 
             hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
@@ -194,7 +187,7 @@ class ExpressionModel(BaseModel):
             theta = theta/theta.sum(-1, keepdim = True)
 
             read_scale = pyro.sample(
-                'read_depth', dist.LogNormal(torch.log(read_depth), 2.).to_event(1)
+                'read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1)
             )
 
             #read_scale = torch.minimum(read_scale, self.max_scale)
