@@ -194,7 +194,7 @@ class ExpressionModel(BaseModel):
             theta = theta/theta.sum(-1, keepdim = True)
 
             read_scale = pyro.sample(
-                'read_depth', dist.LogNormal(torch.log(read_depth), 2.).to_event(1)
+                'read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1)
             )
 
             #read_scale = torch.minimum(read_scale, self.max_scale)
