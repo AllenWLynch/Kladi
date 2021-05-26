@@ -17,6 +17,7 @@ from collections import Counter
 import numpy as np
 import pickle
 from scipy import sparse
+import re
 
 class LogMock:
 
@@ -28,6 +29,10 @@ class LogMock:
 
 class BadGeneException(Exception):
     pass
+
+'''class CovISD:
+
+    def __init__(self, isd_scores, state_idx, tree_positions, )'''
 
 class RPModeler(FromRegions):
 
@@ -238,31 +243,110 @@ class RPModeler(FromRegions):
         
         return state_knockout_scores
 
+    @staticmethod
+    def _parse_motif_name(motif_name):
+        return [x.upper() for x in re.split('[/::()-]', motif_name)]
+
+    def _get_trajectory_latent_vars(self, atac_latent_compositions, expression_latent_compositions, 
+        pseudotime_model, bin_size = 100):
+
+        state_idx, tree_position, bin_masks = list(zip(*pseudotime_model._iterate_all_bins(bin_size = bin_size)))
+
+        atac_states, expr_states = [],[]
+        for bin_mask in bin_masks:
+            atac_states.append(atac_latent_compositions[bin_mask].mean(0, keepdims = True))
+            expr_states.append(expression_latent_compositions[bin_mask].mean(0, keepdims = True))
+
+        return np.vstack(atac_states), np.vstack(expr_states), (state_idx, tree_position)
+
+
+    def _match_TF_hits_to_expr(self):
+        
+        expression_genes_map = dict(zip(self.expression_model.genes, range(len(self.expression_model.genes))))
+        factor_names = np.array(self.accessibility_model.factor_names)
+        
+        modeled_factor_mask, factor_expression_idx = [],[]
+        for idx, factor_name in enumerate(factor_names):
+            for parsed_name in self._parse_motif_name(factor_name):
+                if parsed_name in expression_genes_map:
+                    modeled_factor_idx.append(idx)
+                    factor_expression_idx[expression_genes_map[parsed_name]]
+                    break
+
+        return np.array(modeled_factor_mask), np.array(factor_expression_idx)
+
+    @staticmethod
+    def _get_ISD_covariance(isd_tensor, predicted_expression, predicted_tf_expression):
+
+        expr_matrix = predicted_expression.T
+        tf_expr = predicted_tf_expression.T
+
+        covariance_matrix = ((isd_tensor - isd_tensor.mean(-1, keepdims = True)) * \
+            (expr_matrix - expr_matrix.mean(-1, keepdims = True))[:, np.newaxis, :]).sum(-1) \
+            / (expr_matrix.shape[-1] * expr_matrix.std(-1))[:, np.newaxis]
+
+        isd_tf_expr_corr = np.nan_to_num(((isd_tensor - isd_tensor.mean(-1, keepdims = True)) * \
+            (tf_expr - tf_expr.mean(-1, keepdims = True))[np.newaxis,:, :]).sum(-1) \
+            / (tf_expr.shape[-1] * tf_expr.std(-1)[np.newaxis, :] * isd_tensor.std(-1)))        
+
+        tf_mask = isd_tf_expr_corr > 0.0
+
+        return np.multiply(covariance_matrix, tf_mask)
+
     def covariance_isd(self,*,gene_models, pseudotime_model, raw_expression = None, expression_latent_compositions = None,
         accessibility_matrix = None, accessibility_latent_compositions = None, bin_size = 100):
 
         try:
             self.accessibility_model.motif_hits
+            self.accessibility_model.factor_names
         except AttributeError:
             raise Exception('User must run "get_motif_hits_in_peaks" using accessibility model before running this function.')
 
         atac_latent_compositions = self._get_latent_vars(self.accessibility_model, accessibility_latent_compositions, accessibility_matrix)
         expression_latent_compositions = self._get_latent_vars(self.expression_model, expression_latent_compositions, raw_expression)
 
-        state_idx, tree_position, bin_masks = list(zip(*pseudotime_model._iterate_all_bins(bin_size = bin_size)))
+        assert(len(atac_latent_compositions) == len(expression_latent_compositions))
 
-        atac_bins, expr_bins = [],[]
-
-        for bin_mask in bin_masks:
-            atac_bins = atac_latent_compositions[bin_mask].mean(0, keepdims = True)
-            expr_bins = expression_latent_compositions[bin_mask].mean(0, keepdims = True)
-
-        atac_bins, expr_bins = np.vstack(atac_bins), np.vstack(expr_bins)
-
-        ISD_scores = self.insilico_deletion(gene_models, )
+        atac_states, expr_states, state_meta = self._get_trajectory_latent_vars(atac_latent_compositions, expression_latent_compositions, 
+            pseudotime_model, bin_size=bin_size)
         
+        #match TF motif names to expression in system
+        factor_mask, factor_gene_idx_map = self._match_TF_hits_to_expr()
+        motif_hits = self.accessibility_model.motif_hits[factor_mask, : ].copy()
+        factor_names = self.accessibility_model.factor_names[factor_mask]
 
+        #match gene RP models with expression
+        expression_genes_map = dict(zip(self.expression_model.genes, range(len(self.expression_model.genes))))
+        #if the gene_model's gene is in the scIPM expression model, advance the RP model and record the idx of the gene
+        #in the scIPM model
+        rp_gene_to_expr_map, gene_models = list(zip(*[(expression_genes_map[gene_model.name], gene_model) 
+            for gene_model in gene_models if gene_model.name in expression_genes_map]))
+        rp_gene_to_expr_map = np.array(rp_gene_to_expr_map)
 
+        #get ISD
+        ISD_scores = self.insilico_deletion(gene_models, atac_model.motif_hits, atac_bins) #genes x TFs x time
+
+        predicted_expression = self.expression_model.imputed(expression_latent_compositions)
+
+        #remove ISDs if variance is too low (not enough hits around genes)
+        successful_isds = np.isclose(ISD_scores.var(axis = (0,2)), 0, 1e-5)
+
+        factor_names = factor_names[successful_isds]
+        factor_gene_idx_map = factor_gene_idx_map[successful_isds]
+        ISD_scores = ISD_scores[:, successful_isds, :]
+        
+        #normalize for each TF, then each gene for comparability
+        ISD_scores = ISD_scores/np.linalg.norm(ISD_scores, axis=(0,2))[np.newaxis, : , np.newaxis] # normalize across genes and states per each TF
+        ISD_scores = ISD_scores - ISD_scores.mean(axis = (1,2))[:, np.newaxis, np.newaxis] # subtract the mean ISD for each gene
+
+        cov_score = self._get_ISD_covariance(ISD_scores, 
+            predicted_expression[:, rp_gene_to_expr_map], 
+            predicted_expression[:, factor_gene_idx_map])
+        
+        gene_names = np.array([model.name for model in gene_models])
+
+        return cov_score, ISD_scores, gene_names, factor_names, state_meta
+        
 
 class PyroRPVI(PyroModule):
     
