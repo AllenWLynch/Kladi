@@ -120,7 +120,7 @@ class ExpressionDecoder(nn.Module):
     def forward(self, latent_composition):
         inputs = self.drop(latent_composition)
         # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(self.drop(inputs))), dim=1), self.bn2(self.fc(inputs))
+        return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
 
 
 class ExpressionModel(BaseModel):
