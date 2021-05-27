@@ -120,13 +120,13 @@ class ExpressionDecoder(nn.Module):
     def forward(self, latent_composition):
         inputs = self.drop(latent_composition)
         # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(self.drop(inputs))), dim=1), self.bn2(self.fc(inputs))
+        return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
 
 
 class ExpressionModel(BaseModel):
 
     @classmethod
-    def param_search(cls,*,counts, genes, num_modules = [5, 10, 15, 20, 25], initial_counts = 10, dropout = 0.2, hidden = 128, use_cuda = True,
+    def param_search(cls,*,counts, genes, num_modules, highly_variable = None, initial_counts = 10, dropout = 0.2, hidden = 128, use_cuda = True,
         num_epochs = 100, batch_size = 32, learning_rate = 1e-3, eval_every = 1, test_proportion = 0.05 
     ):
         
@@ -136,7 +136,7 @@ class ExpressionModel(BaseModel):
             assert(isinstance(K, int) and K > 0)
             logging.info('Training model with {} modules ...'.format(str(K)))
             logging.info('----------------------------------')
-            test_model = cls(genes, num_modules=K, initial_counts = initial_counts, dropout=dropout, hidden=hidden, use_cuda=use_cuda)
+            test_model = cls(genes, highly_variable = highly_variable, num_modules=K, initial_counts = initial_counts, dropout=dropout, hidden=hidden, use_cuda=use_cuda)
             test_model.fit(counts, num_epochs = num_epochs, batch_size = batch_size, learning_rate = learning_rate, eval_every = eval_every, 
                 test_proportion = test_proportion, use_validation_set = True)
 

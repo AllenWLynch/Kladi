@@ -17,6 +17,7 @@ from kladi.motif_scanning import moods_scan
 import configparser
 import requests
 import json
+from lisa.core.utils import indices_list_to_sparse_array
 import logging
 
 
@@ -226,7 +227,7 @@ class AccessibilityModel(BaseModel):
     def get_top_peaks(self, module_num, top_n = 20000):
         return self.rank_peaks(module_num)[-top_n : ]
 
-    def _batch_impute(self, latent_compositions, batch_size = 128):
+    def _batch_impute(self, latent_compositions, batch_size = 256):
 
         self._check_latent_vars(latent_compositions)
 
@@ -292,14 +293,65 @@ class AccessibilityModel(BaseModel):
 
         return sorted(list(zip(self.motif_ids, self.factor_names, pvals, test_statistics)), key = lambda x:(x[2], -x[3]))
 
-    @staticmethod
-    def plot_motif_enrichments(enrichment_results):
-        pass
 
-    def get_gene_activity(self, latent_compositions, rp_models):
+    def _insilico_deletion(self, gene_models, deletion_masks, latent_compositions):
+
+        assert(sparse.isspmatrix(deletion_masks))
+        deletion_masks = deletion_masks.tocoo().astype(bool).astype(int)
+        assert(deletion_masks.shape[1] == len(self.peaks))
+        deletion_masks.eliminate_zeros()
         
-        #for peak_probabilities in self.batch_impute(latent_compositions):
-        raise NotImplementedError()
+        num_states = len(latent_compositions)
+        num_genes = len(gene_models)
+        num_knockouts = deletion_masks.shape[0]
+        num_steps = num_states * num_genes
 
-    def learn_rp_models(self,*, genes, raw_expression, read_depth):
-        pass
+        reg_states = list(self._batch_impute(latent_compositions, batch_size = num_states))[0]
+
+        del_i, del_j = deletion_masks.row, deletion_masks.col
+
+        logging.info('Calculating insilico-deletion scores ...')
+        with tqdm(total=num_steps) as bar:
+            
+            state_knockout_scores = []
+            for reg_state in reg_states:
+                
+                reg_state = reg_state[np.newaxis, :]
+                knockout_states = np.repeat(reg_state, num_knockouts, axis = 0)
+                knockout_states[del_i, del_j] = 0
+
+                isd_states = np.vstack([reg_state, knockout_states])
+
+                rp_scores = []
+                for model in gene_models:
+                    rp_scores.append(np.exp(model.predict(isd_states)))
+                    bar.update(1)
+
+                rp_scores = np.hstack(rp_scores)
+                #num_knockouts + 1, num_genes
+                rp_scores = 1 - rp_scores[1:]/rp_scores[0]
+                state_knockout_scores.append(rp_scores.T[:,:, np.newaxis])
+
+        state_knockout_scores = np.concatenate(state_knockout_scores, axis = -1)
+        
+        return state_knockout_scores
+
+    def get_most_accessible_genes(self, rp_models, module_num, top_n_genes = 200, top_peak_quantile = 0.2):
+        
+        assert(isinstance(module_num, int) and module_num >= 0 and module_num < self.num_topics)
+        assert(isinstance(top_peak_quantile, float) and top_peak_quantile > 0 and top_peak_quantile < 1.)
+        assert(isinstance(top_n_genes, int) and top_n_genes > 0)
+
+        module_idx = self._argsort_peaks(module_num)[-int(self.num_features*top_peak_quantile) : ]
+        deletion_mask = indices_list_to_sparse_array([module_idx], self.num_features)
+
+        reg_state = np.zeros(self.num_topics)[np.newaxis,:]
+        reg_state[0,module_num] = 1.0
+        reg_state = reg_state.astype(np.float32)
+
+        isd_scores = np.ravel(self._insilico_deletion(rp_models, deletion_mask, reg_state))
+        genes = [model.name for model in rp_models]
+
+        sorted_gene_scores = sorted(zip(genes, isd_scores), key = lambda x : x[1])
+
+        return sorted_gene_scores[-top_n_genes:]
