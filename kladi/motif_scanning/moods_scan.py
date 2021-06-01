@@ -12,6 +12,7 @@ import numpy as np
 from scipy import sparse
 import logging
 from glob import glob
+import tqdm
 
 config = configparser.ConfigParser()
 config.read('kladi/motif_scanning/config.ini')
@@ -86,10 +87,12 @@ def download_jaspar_motifs():
 
 def get_peak_sequences(peaks, genome, output_file):
 
+    logging.info('Getting peak sequences ...')
+
     fa = pyfaidx.Fasta(genome)
 
     with open(output_file, 'w') as f:
-        for i, (chrom,start,end) in enumerate(peaks):
+        for i, (chrom,start,end) in tqdm.tqdm(enumerate(peaks), desc = 'Sequences processed'):
 
             peak_sequence = fa[chrom][int(start) : int(end)].seq
 
@@ -177,6 +180,7 @@ def get_motif_enrichments(peaks, genome, pvalue_threshold = 0.0001):
     temp_fasta.close()
 
     try:
+
         get_peak_sequences(peaks, genome, temp_fasta_name)
 
         hits_matrix = get_motif_hits(temp_fasta_name, len(peaks), pvalue_threshold = pvalue_threshold)

@@ -3,9 +3,10 @@ import numpy as np
 from scipy.stats import mannwhitneyu
 import logging
 import tqdm
-from kladi.core.plot_utils import map_colors
+from kladi.core.plot_utils import map_colors, layout_labels
 import re
 from sklearn.preprocessing import scale
+import warnings
 
 class CovISD:
 
@@ -126,9 +127,11 @@ class CovISD:
         ISD_scores = ISD_scores/np.linalg.norm(ISD_scores, axis=(0,2))[np.newaxis, : , np.newaxis] # normalize across genes and states per each TF
         ISD_scores = ISD_scores - ISD_scores.mean(axis = (1,2))[:, np.newaxis, np.newaxis] # subtract the mean ISD for each gene
         
-        cov_score = self._get_ISD_covariance(ISD_scores, 
-            predicted_expression[:, rp_gene_to_expr_map], 
-            predicted_expression[:, factor_gene_idx_map])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cov_score = self._get_ISD_covariance(ISD_scores, 
+                predicted_expression[:, rp_gene_to_expr_map], 
+                predicted_expression[:, factor_gene_idx_map])
         
         self.gene_names = np.array([model.name for model in gene_models])
         self.successful_isds = successful_isds
@@ -144,7 +147,7 @@ class CovISD:
         assert(gene in self.gene_names)
         gene_idx = np.argwhere(gene == self.gene_names)[0]
 
-        return self.factor_names[self.tf_gene_cov_score[gene_idx, :].argsort()][::-1]
+        return self.factor_names[self.tf_gene_cov_score[gene_idx, :].argsort()][0][::-1]
         
 
     def get_driver_TFs(self, genelist, relationship = 'activating', sort = True):
@@ -172,7 +175,7 @@ class CovISD:
         return self.tf_gene_cov_score, self.gene_names, self.factor_names
     
     def plot_compare_gene_modules(self, module1, module2, top_n_genes=(200,200), pval_threshold = (1e-3, 1e-3),
-        palette = 'coolwarm', ax = None, figsize = (10,7), fontsize = 12, interactive = False):
+        palette = 'coolwarm', ax = None, figsize = (10,7), fontsize = 12, interactive = False, label_closeness = 5):
         
         gs1 = self.expression_model.get_top_genes(module1, top_n_genes[0])
         gs2 = self.expression_model.get_top_genes(module2, top_n_genes[1])
@@ -180,8 +183,10 @@ class CovISD:
         _, factor_gene_idx_map = self._match_TF_hits_to_expr()
         factor_gene_idx_map = factor_gene_idx_map[self.successful_isds]
         
-        module1_factor_activations = scale(self.expression_model._get_beta()[module1][:, np.newaxis])[factor_gene_idx_map, :]
-        module2_factor_activations = scale(self.expression_model._get_beta()[module2][:, np.newaxis])[factor_gene_idx_map, :]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            module1_factor_activations = scale(self.expression_model._get_beta()[module1][:, np.newaxis])[factor_gene_idx_map, :]
+            module2_factor_activations = scale(self.expression_model._get_beta()[module2][:, np.newaxis])[factor_gene_idx_map, :]
         
         hue = np.ravel(module1_factor_activations - module2_factor_activations)
         
@@ -189,13 +194,13 @@ class CovISD:
             gs1, gs2, axlabels = ('-log10 Module {}'.format(str(module1)), '-log10 Module {}'.format(str(module2))),
             pval_threshold = pval_threshold, hue = hue, palette = palette, ax = ax, figsize = figsize, 
             legend_label = 'Relative Expression \n< Module {} - Module {} >'.format(str(module2), str(module1)),
-            fontsize = fontsize, interactive = interactive
+            fontsize = fontsize, interactive = interactive, label_closeness = label_closeness
         )
         
 
     def plot_compare_genelists(self, genelist1, genelist2, axlabels = ('-log10 genelist1','-log10 genelist2'), pval_threshold = (1e-3, 1e-3),
         hue = None, palette = 'coolwarm', hue_order = None, ax = None, figsize = (10,7), legend_label = '', show_legend = True, fontsize = 12,
-        interactive = False, color = 'grey'):
+        interactive = False, color = 'grey', label_closeness = 5):
         
         if ax is None:
             fig, ax = plt.subplots(1,1,figsize = figsize)
@@ -212,7 +217,7 @@ class CovISD:
         else:
             cell_colors = color
 
-        _, l1_pvals, _ = list(zip(*self.get_driver_TFs(genelist1, sort=False)))
+        factor_names, l1_pvals, _ = list(zip(*self.get_driver_TFs(genelist1, sort=False)))
         _, l2_pvals, _ = list(zip(*self.get_driver_TFs(genelist2, sort=False)))
         
         l1_pvals = np.array(l1_pvals)
@@ -225,11 +230,12 @@ class CovISD:
         
         if not interactive:
             ax.scatter(x, y, c = cell_colors)
-            for text_x, text_y, factor in zip(x[name_mask], y[name_mask], self.factor_names[name_mask]):
-                ax.text(text_x + 0.05, text_y + 0.05, str(factor), fontsize = fontsize)
+            layout_labels(ax = ax, x = x[name_mask], y = y[name_mask], label_closeness = label_closeness, 
+                fontsize = fontsize, label = np.array(factor_names)[name_mask])
 
             ax.set(xlabel = axlabels[0], ylabel = axlabels[1])
-
+            ax.spines["right"].set_visible(False)
+            ax.spines["top"].set_visible(False)
             return ax
         else:
             raise NotImplementedError()

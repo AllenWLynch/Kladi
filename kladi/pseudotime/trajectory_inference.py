@@ -7,7 +7,7 @@ from scipy.sparse import csgraph
 from scipy import sparse
 from sklearn.metrics import pairwise_distances
 from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import minmax_scale
+from sklearn.preprocessing import minmax_scale, scale
 from sklearn.linear_model import LogisticRegression
 from joblib import Parallel, delayed
 from scipy.stats import entropy, pearsonr, norm
@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as pltcolors
 from umap import UMAP
+from matplotlib.patches import Patch
 import logging
 import warnings
 
@@ -124,12 +125,9 @@ class PalantirTrajectoryInference:
         assert(isinstance(n_waypoints, int) and n_waypoints > 0)
         n_waypoints = min(n_waypoints, len(self.cell_features))
 
-        assert(isinstance(terminal_states, (list, np.ndarray)) or terminal_states is None)
-
-        if not terminal_states is None:
-            if isinstance(terminal_states, list):
-                terminal_states = np.array(terminal_states)
-            terminal_states = np.ravel(terminal_states)
+        assert(isinstance(terminal_states, (list, np.ndarray)))
+        terminal_states = np.ravel(np.array(terminal_states))
+        assert(np.issubdtype(terminal_states.dtype, np.number))
 
         assert(isinstance(use_early_cell_as_start, bool))
 
@@ -184,15 +182,16 @@ class PalantirTrajectoryInference:
 
         return waypoints
 
-    def get_pseudotime(self, early_cell, max_iterations=25, use_early_cell_as_start = False,
-        terminal_states = None, terminal_state_names = None, n_waypoints = 1200):
+    def get_pseudotime(self, early_cell, max_iterations=25, use_early_cell_as_start = True, 
+        n_waypoints = 300, **terminal_states):
 
         assert(isinstance(max_iterations, int) and max_iterations > 0)
-       
         try:
             self.eigspace
         except AttributeError:
             raise Exception('Diffusion space not yet calculated! Run "fit_diffusion_map" function first!')
+        n_waypoints= min(len(self.cell_features), n_waypoints)
+        terminal_state_names, terminal_states = list(terminal_states.keys()), list(terminal_states.values())
 
         self.waypoints, self.start_cell = self._get_waypoints(early_cell, n_waypoints = n_waypoints, 
             terminal_states = terminal_states, use_early_cell_as_start=use_early_cell_as_start)
@@ -261,21 +260,21 @@ class PalantirTrajectoryInference:
             pseudotime = new_traj
             iteration += 1
 
-        self.pseudotime = pseudotime
+        self.pseudotime = pseudotime - pseudotime.min() #make 0 minimum
         self.waypoint_weights = W
 
-        if not terminal_states is None:
+        if len(terminal_states) > 0:
             
             terminal_states = np.ravel(np.array(terminal_states))
             terminal_state_order = np.argsort(terminal_states)
 
             self.terminal_states = terminal_states[terminal_state_order]
             
-            if not terminal_state_names is None:
-                self.lineage_names = np.ravel(np.array(terminal_state_names))[terminal_state_order]
-                assert(len(self.terminal_states) == len(self.lineage_names))
-            else:
-                self.lineage_names = list(range(len(self.terminal_states)))
+            self.lineage_names = np.ravel(np.array(terminal_state_names))[terminal_state_order]
+            assert(len(self.terminal_states) == len(self.lineage_names))
+        
+        else:
+            raise NotImplementedError()
 
         return pseudotime
 
@@ -618,7 +617,7 @@ class PalantirTrajectoryInference:
         plt.tight_layout()
 
         cbar = plt.colorbar(cm.ScalarMappable(Normalize(0, 1), cmap=palette), orientation = 'vertical', ax = ax[0,-1], 
-            anchor = (1., 0.5), aspect = 15, shrink = 0.5, label = '')
+            panchor = (1.05, 0.5), aspect = 15, shrink = 0.5, label = '')
 
         cbar.ax.tick_params(labelsize='x-large')
         cbar.set_label('P( Terminal State )',size='x-large')
@@ -708,7 +707,7 @@ class PalantirTrajectoryInference:
             raise Exception('User must run "get_pseudotime" before this function.')
 
         data_representation = self.check_representation(data_representation)
-        
+
         if ax is None:
             fig,ax = plt.subplots(1,1,figsize=figsize)
 
@@ -716,9 +715,18 @@ class PalantirTrajectoryInference:
         fig.colorbar(cm.ScalarMappable(Normalize(self.pseudotime.min(), self.pseudotime.max()), cmap=palette), ax=ax, 
             location = 'left', pad = 0.01, shrink = 0.25, aspect = 15, label = 'Pseudotime')
 
+        ax.scatter(data_representation[self.terminal_states,0], data_representation[self.terminal_states,1], c = 'black', 
+            s = 25 * size, label = 'Terminal State')
+        ax.scatter(data_representation[self.start_cell,0],
+            data_representation[self.start_cell,1], label = 'Root', c = 'red', s = 25 * size)
+
+        legend_kwargs = dict(loc="upper left", markerscale = 1, frameon = False, fontsize='large', bbox_to_anchor=(-0.1, 1.05))
+
+        ax.legend(**legend_kwargs)
         ax.axis('off')
 
         return ax
+
 
     def plot_states(self, data_representation = None, figsize = (10,7), palette = 'Set3', size = 2, ax = None):
         
@@ -736,7 +744,7 @@ class PalantirTrajectoryInference:
 
         legend_labels = {}
         for state_idx, (start_node, end_node) in state_nodes.items():
-            legend_labels[state_idx] = self.lineage_tree.get_node_name(end_node) 
+            legend_labels[state_idx] = str(state_idx) + ': ' + self.lineage_tree.get_node_name(end_node) 
 
         sorted_by_multipotency = sorted(list(state_nodes.items()), key = lambda x : len(str(x).split(',')))[::-1]
         for i, (state, node) in enumerate(sorted_by_multipotency):
@@ -802,7 +810,7 @@ class PalantirTrajectoryInference:
 
     def plot_feature_stream(self, features, labels = None, color = 'black', log_pseudotime = True, figsize = (20,10),
         scale_features = False, center_baseline = True, bin_size = 25, palette = 'Set3', ax=None, title = None, show_legend = True,
-        max_bar_height = 0.5, hide_feature_threshold = 0.03, linecolor = 'grey', linewidth = 0.1, annotate_streams = False):
+        max_bar_height = 0.5, hide_feature_threshold = 0.03, linecolor = 'grey', linewidth = 0.1, annotate_streams = False, clip = 5):
 
         assert(isinstance(max_bar_height, float) and max_bar_height > 0 and max_bar_height < 1)
         assert(isinstance(features, np.ndarray))
@@ -825,19 +833,24 @@ class PalantirTrajectoryInference:
 
         if ax is None:
             fig, ax = plt.subplots(1,1,figsize=figsize)
-
         tree_layout = self.lineage_tree.get_tree_layout()
-
         num_colors = len(cm.get_cmap(palette).colors)
-
         highest_centerline = -1
-        if scale_features:
-            features = minmax_scale(features)
-        else:
-            features = features-features.min(0, keepdims=True) #just make sure no vals are negative
+
+        means, stds = features.mean(0, keepdims = True), features.std(0, keepdims = True)
+        clip_min, clip_max = means - clip*stds, means + clip*stds
+        features = np.clip(features, clip_min, clip_max)
+        features_min, features_max = features.min(0, keepdims = True), features.max(0, keepdims = True)
         
+        if scale_features:
+            features = (features - features_min)/(features_max - features_min) #scale relative heights of features
+        else:
+            features = features-features_min 
+        features = np.maximum(features, 0) #just make sure no vals are negative
+
         features = features/(features.sum(-1).max()) * max_bar_height
         
+        #tracking bin stats for on-stream annotations
         feature_maxes = np.zeros(num_features)
         feature_max_times = np.zeros(num_features)
         feature_max_pos = np.zeros(num_features)

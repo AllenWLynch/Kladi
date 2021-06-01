@@ -120,7 +120,7 @@ class BaseModel(nn.Module):
         raise NotImplementedError()
 
 
-    def predict(self, X, batch_size = 32):
+    def predict(self, X, batch_size = 256):
 
         X = self._validate_data(X)
         assert(isinstance(batch_size, int) and batch_size > 0)

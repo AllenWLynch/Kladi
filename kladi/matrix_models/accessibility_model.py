@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.distributions.constraints as constraints
 from tqdm import tqdm
 import warnings
-
+from sklearn.preprocessing import scale
 from scipy import sparse
 from scipy.stats import fisher_exact
 from scipy.sparse import isspmatrix
@@ -243,7 +243,7 @@ class AccessibilityModel(BaseModel):
         return hits_matrix
 
 
-    def get_motif_hits_in_peaks(self, genome_fasta, p_value_threshold = 0.0001):
+    def get_motif_hits_in_peaks(self, genome_fasta, p_value_threshold = 0.00005):
         
         self.motif_hits, self.motif_ids, self.factor_names = moods_scan.get_motif_enrichments(self.peaks.tolist(), genome_fasta, pvalue_threshold = p_value_threshold)
 
@@ -257,8 +257,12 @@ class AccessibilityModel(BaseModel):
 
         hits_matrix = self._validate_hits_matrix(self.motif_hits)
 
-        return list(zip(self.motif_ids, self.factor_names)), np.vstack([hits_matrix.dot(np.log(peak_probabilities).T).T
+        motif_scores = np.vstack([hits_matrix.dot(np.log(peak_probabilities).T).T
             for peak_probabilities in self._batch_impute(latent_compositions)])
+
+        motif_scores = scale(motif_scores/np.linalg.norm(motif_scores, axis = 1, keepdims = True))
+
+        return list(zip(self.motif_ids, self.factor_names)), motif_scores
 
 
     def enrich_TFs(self, module_num, top_quantile = 0.2):
@@ -333,7 +337,7 @@ class AccessibilityModel(BaseModel):
         
         return state_knockout_scores
 
-    def get_most_accessible_genes(self, rp_models, module_num, top_n_genes = 200, top_peak_quantile = 0.2):
+    def get_most_influenced_genes(self, rp_models, module_num, top_n_genes = 200, top_peak_quantile = 0.2):
         
         assert(isinstance(module_num, int) and module_num >= 0 and module_num < self.num_topics)
         assert(isinstance(top_peak_quantile, float) and top_peak_quantile > 0 and top_peak_quantile < 1.)
@@ -351,4 +355,6 @@ class AccessibilityModel(BaseModel):
 
         sorted_gene_scores = sorted(zip(genes, isd_scores), key = lambda x : x[1])
 
-        return sorted_gene_scores[-top_n_genes:]
+        sorted_gene_symbols = list(zip(*sorted_gene_scores[-top_n_genes:]))[0]
+
+        return sorted_gene_symbols

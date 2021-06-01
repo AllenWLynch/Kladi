@@ -5,6 +5,8 @@ from matplotlib.colors import Normalize
 from matplotlib import cm
 from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+import networkx as nx
 
 def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwargs = {}, cbar_kwargs = {}):
 
@@ -40,6 +42,25 @@ def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwarg
             ], **legend_kwargs)
 
         return c
+
+def layout_labels(*, ax, x, y, label, label_closeness = 5, fontsize = 11):
+
+    xy = np.array([x,y]).T
+    scaler = MinMaxScaler().fit(xy)
+    xy = scaler.transform(xy)
+    scaled_x, scaled_y = xy[:,0], xy[:,1]
+
+    G = nx.Graph()
+    for i,j,l in zip(scaled_x, scaled_y, label):
+        G.add_edge((i,j), l)
+
+    pos_dict = nx.drawing.spring_layout(G, k = 1/(label_closeness * np.sqrt(len(x))), 
+        fixed = list(zip(scaled_x, scaled_y)), pos = {(i,j) : (i,j) for i,j in zip(scaled_x, scaled_y)})
+        
+    for i,j,l in zip(x,y,label):
+        axi, axj = scaler.inverse_transform(pos_dict[l][np.newaxis, :])[0]
+        ax.text(axi, axj ,l, fontsize = fontsize)
+        ax.plot((i,axi), (j,axj), c = 'black', linewidth = 0.2)
 
 def plot_umap(X, hue, palette = 'viridis', projection = '2d', ax = None, figsize= (10,5),
         add_legend = True, hue_order = None, size = 2, title = None):

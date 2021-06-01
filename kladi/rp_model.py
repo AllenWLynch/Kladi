@@ -30,9 +30,6 @@ class LogMock:
 class BadGeneException(Exception):
     pass
 
-'''class CovISD:
-
-    def __init__(self, isd_scores, state_idx, tree_positions, )'''
 
 class RPModeler(FromRegions):
 
@@ -92,7 +89,7 @@ class RPModeler(FromRegions):
 
         return valid_regions
 
-    def _get_gene_model(self, gene_symbol):
+    def _get_gene_model(self, gene_symbol, naive = False):
 
         try:
             gene_idx = np.argwhere(np.array([x[3] for x in self.genes]) == gene_symbol)[0]
@@ -126,13 +123,25 @@ class RPModeler(FromRegions):
 
         region_distances = np.where(np.logical_or(upstream_mask, downstream_mask), region_distances - 1500, region_distances)
 
-        return PyroRPVI(gene_symbol, 
-            region_distances = region_distances,
-            upstream_mask = upstream_mask,
-            downstream_mask = downstream_mask,
-            region_score_map = self.region_score_map,
-            region_mask = region_mask
-        )
+        if not naive:
+            return PyroRPVI(gene_symbol, 
+                region_distances = region_distances,
+                upstream_mask = upstream_mask,
+                downstream_mask = downstream_mask,
+                region_score_map = self.region_score_map,
+                region_mask = region_mask
+            )
+        else:
+            return RPModelPointEstimator(gene_symbol,
+                a_up = 1., a_down=1., a_promoter=1.,
+                distance_up=np.e, distance_down=np.e, b = 0,
+                upstream_mask=upstream_mask,downstream_mask=downstream_mask,
+                promoter_mask=~np.logical_or(upstream_mask, downstream_mask),
+                upstream_distances=region_distances[upstream_mask],
+                downstream_distances=region_distances[downstream_mask],
+                region_mask = region_mask,
+                region_score_map=self.region_score_map
+            )
 
     def _get_latent_vars(self, model, latent_comp = None, matrix = None):
 
@@ -167,6 +176,17 @@ class RPModeler(FromRegions):
             except IndexError:
                 raise Exception('Gene {} not in RefSeq database for this species'.format(model.name))
             model.add_expression_params(raw_expression[:,gene_idx], read_depth, dropout_rate[:, gene_idx])
+
+    def get_naive_models(self, gene_symbols):
+
+        gene_models = []
+        for symbol in gene_symbols:
+            try:
+                gene_models.append(self._get_gene_model(symbol, naive=True))
+            except BadGeneException as err:
+                logging.warn(str(err))
+
+        return gene_models
 
     def train(self, gene_symbols, raw_expression, accessibility_matrix = None, 
         accessibility_latent_compositions = None, iters = 150):
