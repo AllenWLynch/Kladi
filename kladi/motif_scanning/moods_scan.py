@@ -92,7 +92,7 @@ def get_peak_sequences(peaks, genome, output_file):
     fa = pyfaidx.Fasta(genome)
 
     with open(output_file, 'w') as f:
-        for i, (chrom,start,end) in tqdm.tqdm(enumerate(peaks), desc = 'Sequences processed'):
+        for i, (chrom,start,end) in tqdm.tqdm(enumerate(peaks)):
 
             peak_sequence = fa[chrom][int(start) : int(end)].seq
 
@@ -149,7 +149,7 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
             peak_indices.append(peak_num)
             scores.append(float(score))
 
-            if i%100000 == 0:
+            if i%1000000 == 0:
                 logging.info('Found {} motif hits ...'.format(str(i)))
 
     if not process.poll() == 0:

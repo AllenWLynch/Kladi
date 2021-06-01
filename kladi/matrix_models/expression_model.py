@@ -126,7 +126,7 @@ class ExpressionDecoder(nn.Module):
 class ExpressionModel(BaseModel):
 
     @classmethod
-    def param_search(cls,*,counts, genes, num_modules, highly_variable = None, initial_counts = 10, dropout = 0.2, hidden = 128, use_cuda = True,
+    def param_search(cls,*,counts, genes, num_modules, highly_variable = None, initial_counts = 15, dropout = 0.2, hidden = 128, use_cuda = True,
         num_epochs = 100, batch_size = 32, learning_rate = 1e-3, eval_every = 1, test_proportion = 0.05 
     ):
         
@@ -144,7 +144,7 @@ class ExpressionModel(BaseModel):
 
         return testing_loss
 
-    def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 10, 
+    def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 15, 
         dropout = 0.2, hidden = 128, use_cuda = True):
 
         assert(isinstance(genes, (list, np.ndarray)))

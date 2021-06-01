@@ -68,7 +68,7 @@ class Decoder(nn.Module):
 
 class AccessibilityModel(BaseModel):
 
-    def __init__(self, peaks, num_modules = 15, initial_counts = 10, 
+    def __init__(self, peaks, num_modules = 15, initial_counts = 15, 
         dropout = 0.2, hidden = 128, use_cuda = True):
 
         assert(isinstance(peaks, (list, np.ndarray)))
