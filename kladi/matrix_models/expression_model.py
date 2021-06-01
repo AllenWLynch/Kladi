@@ -330,8 +330,6 @@ class ExpressionModel(BaseModel):
         gene_idx = np.argwhere(self.genes == gene)[0]
         return list(sorted(zip(range(self.num_topics), self._get_beta()[:, gene_idx]), key = lambda x : x[1]))
     
-    def _get_beta(self):
-        return super()._get_beta()[:, :-1]
 
     def post_genelist(self, module_num, top_n_genes = 200):
 
