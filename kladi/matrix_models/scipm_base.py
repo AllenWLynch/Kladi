@@ -6,7 +6,7 @@ import pyro.distributions as dist
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pyro.optim import Adam
+from torch.optim import Adam
 from pyro.infer import SVI, TraceMeanField_ELBO
 from tqdm import tqdm, trange
 from pyro.nn import PyroModule
@@ -32,7 +32,7 @@ class EarlyStopping:
         if current_loss is None:
             pass
         else:
-            if (current_loss - self.best_loss) < -self.tolerance:
+            if (current_loss - self.best_loss) < -self.tolerance[0]:
                 self.best_loss = current_loss
                 self.wait = 1
             else:
@@ -168,7 +168,8 @@ class BaseModel(nn.Module):
         raise NotImplementedError()
 
 
-    def fit(self, X, num_epochs = 100, batch_size = 32, learning_rate = 1e-3, test_proportion = 0.05, use_validation_set = False, tolerance = 1e-4):
+    def fit(self, X,*, num_epochs, batch_size, test_proportion, use_validation_set, learning_rate, tolerance,
+        lr_decay, patience):
 
         eval_every = 1
         assert(isinstance(num_epochs, int) and num_epochs > 0)
@@ -192,11 +193,11 @@ class BaseModel(nn.Module):
 
         logging.info('Initializing model ...')
 
-        scheduler = pyro.optim.ExponentialLR({'optimizer': Adam, 'optim_args': {'lr': 1e-3}, 'gamma': 0.9})
+        scheduler = pyro.optim.ExponentialLR({'optimizer': Adam, 'optim_args': {'lr': learning_rate}, 'gamma': lr_decay})
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 
         if use_validation_set:
-            logging.warn('Using hold-out set of cells for validation loss. When computing your final model, set "use_validation_set" to False so that all cells are used in computaiton of latent variables. This ensures that holdout-set cells\' latent variables do not have different quality/distribution from train-set cells')
+            #logging.warn('Using hold-out set of cells for validation loss. When computing your final model, set "use_validation_set" to False so that all cells are used in computaiton of latent variables. This ensures that holdout-set cells\' latent variables do not have different quality/distribution from train-set cells')
             test_set = np.random.rand(n_observations) < test_proportion
             logging.info("Training with {} cells, testing with {}.".format(str((~test_set).sum()), str(test_set.sum())))
         else:
@@ -206,12 +207,13 @@ class BaseModel(nn.Module):
         logging.info('Training ...')
         self.training_loss = []
         self.testing_loss = []
-        early_stopper = EarlyStopping(tolerance= tolerance, patience=3)
+
+        early_stopper = EarlyStopping(tolerance= tolerance, patience=patience)
 
         self.train()
         self.num_epochs_trained = 1
         try:
-            t = tqdm.trange(num_epochs, desc = 'Epoch 0', leave = True)
+            t = trange(num_epochs, desc = 'Epoch 0', leave = True)
             for epoch in t:
                 running_loss = 0.0
                 for batch in self._get_batches(X[train_set], batch_size = batch_size):
@@ -226,12 +228,14 @@ class BaseModel(nn.Module):
                 loss_type = 'training'
                 if (epoch % eval_every == 0 or epoch == num_epochs) and test_set.sum() > 0:
                     self.eval()
-                    test_loss = self.get_logp(X[test_set])/(test_set.sum() * self.num_exog_features)
+                    test_loss = self._get_logp(X[test_set])/(test_set.sum() * self.num_exog_features)
                     self.train()
                     self.testing_loss.append(test_loss)
                     recent_losses = self.testing_loss[-5:]
                     loss_type = 'testing'
+                    #print(test_loss)
                     if early_stopper.should_stop_training(test_loss):
+                        logging.info('Stopped training early!')
                         break
 
                 else:

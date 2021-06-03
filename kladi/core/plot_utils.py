@@ -8,6 +8,29 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 import networkx as nx
 from collections import Counter
+from math import ceil
+
+
+def map_plot(func, *data, plots_per_row = 3, height =4, aspect = 1.5):
+
+    num_plots = len(data[0])
+    assert(all([len(x) == num_plots for x in data]))
+
+    num_rows = ceil(num_plots/plots_per_row)
+    plots_per_row = min(plots_per_row, num_plots)
+
+    fig, ax = plt.subplots(num_rows, plots_per_row, figsize = (height*aspect*plots_per_row, height*num_rows))
+    if num_rows==1:
+        ax = ax[np.newaxis, :]
+
+    for i, d in enumerate(zip(ax.ravel(), *data)):
+        ax_i = d[0]
+        func(ax_i, *d[1:])
+
+    for ax_i in ax.ravel()[num_plots:]:
+        ax_i.axis('off')
+
+    return fig, ax
 
 def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwargs = {}, cbar_kwargs = {}):
 
