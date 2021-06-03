@@ -7,13 +7,14 @@ from kladi.core.plot_utils import map_colors, layout_labels
 import re
 from sklearn.preprocessing import scale
 import warnings
+from collections import Counter
 
 class CovISD:
 
     def __init__(self, *, accessibility_model, expression_model, pseudotime_model):
         
         try:
-            accessibility_model.motif_hits
+            accessibility_model.factor_hits
             accessibility_model.factor_names
         except AttributeError:
             raise Exception('User must run "get_motif_hits_in_peaks" using accessibility model before running this function.')
@@ -98,7 +99,7 @@ class CovISD:
         
         #match TF motif names to expression in system
         factor_mask, factor_gene_idx_map = self._match_TF_hits_to_expr()
-        motif_hits = self.accessibility_model.motif_hits[factor_mask, : ].copy()
+        motif_hits = self.accessibility_model.factor_hits[factor_mask, : ].copy()
         factor_names = np.array(self.accessibility_model.factor_names)[factor_mask]
         logging.info('Matched {} factors with expression data.'.format(str(len(factor_names))))
         
@@ -175,7 +176,7 @@ class CovISD:
         return self.tf_gene_cov_score, self.gene_names, self.factor_names
     
     def plot_compare_gene_modules(self, module1, module2, top_n_genes=(200,200), pval_threshold = (1e-3, 1e-3),
-        palette = 'coolwarm', ax = None, figsize = (10,7), fontsize = 12, interactive = False, label_closeness = 5):
+        palette = 'coolwarm', ax = None, figsize = (10,7), fontsize = 12, interactive = False, label_closeness = 5, max_label_repeats = 5):
         
         gs1 = self.expression_model.get_top_genes(module1, top_n_genes[0])
         gs2 = self.expression_model.get_top_genes(module2, top_n_genes[1])
@@ -194,13 +195,13 @@ class CovISD:
             gs1, gs2, axlabels = ('-log10 Module {}'.format(str(module1)), '-log10 Module {}'.format(str(module2))),
             pval_threshold = pval_threshold, hue = hue, palette = palette, ax = ax, figsize = figsize, 
             legend_label = 'Relative Expression \n< Module {} - Module {} >'.format(str(module2), str(module1)),
-            fontsize = fontsize, interactive = interactive, label_closeness = label_closeness
+            fontsize = fontsize, interactive = interactive, label_closeness = label_closeness, max_label_repeats = max_label_repeats,
         )
         
 
     def plot_compare_genelists(self, genelist1, genelist2, axlabels = ('-log10 genelist1','-log10 genelist2'), pval_threshold = (1e-3, 1e-3),
         hue = None, palette = 'coolwarm', hue_order = None, ax = None, figsize = (10,7), legend_label = '', show_legend = True, fontsize = 12,
-        interactive = False, color = 'grey', label_closeness = 5):
+        interactive = False, color = 'grey', label_closeness = 5, max_label_repeats = 5):
         
         if ax is None:
             fig, ax = plt.subplots(1,1,figsize = figsize)
@@ -231,7 +232,7 @@ class CovISD:
         if not interactive:
             ax.scatter(x, y, c = cell_colors)
             layout_labels(ax = ax, x = x[name_mask], y = y[name_mask], label_closeness = label_closeness, 
-                fontsize = fontsize, label = np.array(factor_names)[name_mask])
+                fontsize = fontsize, label = np.array(factor_names)[name_mask], max_repeats = max_label_repeats)
 
             ax.set(xlabel = axlabels[0], ylabel = axlabels[1])
             ax.spines["right"].set_visible(False)

@@ -7,6 +7,7 @@ from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 import networkx as nx
+from collections import Counter
 
 def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwargs = {}, cbar_kwargs = {}):
 
@@ -43,7 +44,7 @@ def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwarg
 
         return c
 
-def layout_labels(*, ax, x, y, label, label_closeness = 5, fontsize = 11):
+def layout_labels(*, ax, x, y, label, label_closeness = 5, fontsize = 11, max_repeats = 5):
 
     xy = np.array([x,y]).T
     scaler = MinMaxScaler().fit(xy)
@@ -51,16 +52,36 @@ def layout_labels(*, ax, x, y, label, label_closeness = 5, fontsize = 11):
     scaled_x, scaled_y = xy[:,0], xy[:,1]
 
     G = nx.Graph()
+    num_labels = Counter(label)
+    encountered_labels = Counter()
+    
+    sort_order = np.argsort(scaled_x + scaled_y)[::-1]
+    scaled_x = scaled_x[sort_order]
+    scaled_y = scaled_y[sort_order]
+    label = np.array(label)[sort_order]
+    
+    new_label_names = []
     for i,j,l in zip(scaled_x, scaled_y, label):
-        G.add_edge((i,j), l)
+        if num_labels[l] > 1:
+            encountered_labels[l]+=1
+            if encountered_labels[l] <= max_repeats:
+                l = l + ' ({})'.format(str(encountered_labels[l])) #make sure labels are unique
+                G.add_edge((i,j), l)
+        else:
+            G.add_edge((i,j), l)
 
     pos_dict = nx.drawing.spring_layout(G, k = 1/(label_closeness * np.sqrt(len(x))), 
-        fixed = list(zip(scaled_x, scaled_y)), pos = {(i,j) : (i,j) for i,j in zip(scaled_x, scaled_y)})
+        fixed = [(i,j) for (i,j),l in G.edges], 
+        pos = {(i,j) : (i,j) for (i,j),l in G.edges})
         
-    for i,j,l in zip(x,y,label):
+    for (i,j),l in G.edges:
         axi, axj = scaler.inverse_transform(pos_dict[l][np.newaxis, :])[0]
+        i,j = scaler.inverse_transform([[i,j]])[0]
         ax.text(axi, axj ,l, fontsize = fontsize)
         ax.plot((i,axi), (j,axj), c = 'black', linewidth = 0.2)
+
+    return ax
+
 
 def plot_umap(X, hue, palette = 'viridis', projection = '2d', ax = None, figsize= (10,5),
         add_legend = True, hue_order = None, size = 2, title = None):

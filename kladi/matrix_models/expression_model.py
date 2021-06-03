@@ -17,6 +17,7 @@ import json
 from itertools import zip_longest
 import matplotlib.pyplot as plt
 import logging
+from math import ceil
 
 config = configparser.ConfigParser()
 config.read('kladi/matrix_models/config.ini')
@@ -131,7 +132,8 @@ class ExpressionModel(BaseModel):
     ):
         
         assert(isinstance(num_modules, (list, np.ndarray)))
-        testing_loss = []
+        model_stats = {}
+
         for K in num_modules:
             assert(isinstance(K, int) and K > 0)
             logging.info('Training model with {} modules ...'.format(str(K)))
@@ -140,9 +142,66 @@ class ExpressionModel(BaseModel):
             test_model.fit(counts, num_epochs = num_epochs, batch_size = batch_size, learning_rate = learning_rate, eval_every = eval_every, 
                 test_proportion = test_proportion, use_validation_set = True)
 
-            testing_loss.append(test_model.testing_loss[-1])
+            model_stats[K] = dict(
+                testing_loss = test_model.testing_loss,
+                training_loss = test_model.training_loss,
+                num_epochs = test_model.num_epochs_trained
+            )
+            del test_model
 
-        return testing_loss
+        return model_stats
+
+
+    @classmethod
+    def plot_model_losses(cls, model_stats, 
+        num_models_per_row = 4, height = 3, aspect = 1.5, return_fig = False):
+
+        num_models = len(model_stats)
+        
+        num_rows = ceil(num_models/num_models_per_row)
+        num_models_per_row = min(num_models_per_row, num_models)
+
+        fig, ax = plt.subplots(num_rows, num_models_per_row, 
+            figsize = (height*aspect*num_models_per_row, height*num_rows), sharey = True, sharex = True)
+        if num_rows==1:
+            ax = ax[np.newaxis, :]
+        
+        sorted_module_nums = sorted(model_stats.keys())
+
+        for i, ax_i in enumerate(ax.ravel()):
+            model_num = sorted_module_nums[i]
+            model_testing_loss = model_stats[model_num]['testing_loss']
+            model_training_loss = model_stats[model_num]['training_loss']
+            assert(len(model_testing_loss) == len(model_training_loss))
+
+            ax_i.plot(np.arange(len(model_testing_loss)), model_testing_loss, label = 'Test Loss')
+            ax_i.plot(np.arange(len(model_testing_loss)), model_training_loss, label = 'Train Loss')
+
+            ax_i.legend()
+            ax_i.set(xlabel = 'Epoch Num', ylabel = 'Loss', title = '{} Topics'.format(str(model_num)))
+            ax_i.spines["right"].set_visible(False)
+            ax_i.spines["top"].set_visible(False)
+
+        if return_fig:
+            return fig, ax
+
+    @classmethod
+    def plot_final_training_losses(cls, model_stats, training_loss, ax = None, figsize = (10,7)):
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize = figsize)
+
+        x,y = list(zip(*[
+            (module_num, stats['testing_loss'][-1]) for module_num, stats in model_stats.items()
+        ]))
+
+        ax.scatter(x,y)
+        ax.set(title= 'Final Test Loss', xlabel = 'Num Modules', y = 'Loss')
+        ax.spines["right"].set_visible(False)
+        ax.spines["top"].set_visible(False)
+
+        return ax
+
 
     def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 15, 
         dropout = 0.2, hidden = 128, use_cuda = True):
@@ -150,6 +209,7 @@ class ExpressionModel(BaseModel):
         assert(isinstance(genes, (list, np.ndarray)))
         self.genes = np.ravel(np.array(genes))
         self.num_genes = len(self.genes)
+        self.num_exog_features = len(self.genes)
 
         if highly_variable is None:
             highly_variable = np.ones_like(genes).astype(bool)

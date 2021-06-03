@@ -8,13 +8,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pyro.optim import Adam
 from pyro.infer import SVI, TraceMeanField_ELBO
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from pyro.nn import PyroModule
 import numpy as np
 import torch.distributions.constraints as constraints
 from pyro.infer import Predictive
 import logging
 import pickle
+from kladi.matrix_models.ilr import ilr
+
+class EarlyStopping:
+
+    def __init__(self, 
+                 tolerance = 1e-4,
+                 patience=3):
+        self.tolerance = tolerance,
+        self.patience = patience
+        self.wait = 0
+        self.best_loss = 1e15
+
+    def should_stop_training(self, current_loss):
+        
+        if current_loss is None:
+            pass
+        else:
+            if (current_loss - self.best_loss) < -self.tolerance:
+                self.best_loss = current_loss
+                self.wait = 1
+            else:
+                if self.wait >= self.patience:
+                    return True
+                self.wait += 1
+
+        return False
 
 class BaseModel(nn.Module):
 
@@ -125,6 +151,7 @@ class BaseModel(nn.Module):
         X = self._validate_data(X)
         assert(isinstance(batch_size, int) and batch_size > 0)
         
+        self.eval()
         logging.info('Predicting latent variables ...')
         latent_vars = []
         for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, training = False)):
@@ -134,13 +161,16 @@ class BaseModel(nn.Module):
 
         return theta
 
+    def get_UMAP_features(self, X, batch_size = 256):
+        return ilr(self.predict(X, batch_size=batch_size))
+
     def _validate_data(self):
         raise NotImplementedError()
 
 
-    def fit(self, X, num_epochs = 100, 
-            batch_size = 32, learning_rate = 1e-3, eval_every = 1, test_proportion = 0.05, use_validation_set = False):
+    def fit(self, X, num_epochs = 100, batch_size = 32, learning_rate = 1e-3, test_proportion = 0.05, use_validation_set = False, tolerance = 1e-4):
 
+        eval_every = 1
         assert(isinstance(num_epochs, int) and num_epochs > 0)
         assert(isinstance(batch_size, int) and batch_size > 0)
         assert(isinstance(learning_rate, float) and learning_rate > 0)
@@ -162,9 +192,8 @@ class BaseModel(nn.Module):
 
         logging.info('Initializing model ...')
 
-        adam_params = {"lr": 1e-3}
-        optimizer = Adam(adam_params)
-        self.svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
+        scheduler = pyro.optim.ExponentialLR({'optimizer': Adam, 'optim_args': {'lr': 1e-3}, 'gamma': 0.9})
+        self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 
         if use_validation_set:
             logging.warn('Using hold-out set of cells for validation loss. When computing your final model, set "use_validation_set" to False so that all cells are used in computaiton of latent variables. This ensures that holdout-set cells\' latent variables do not have different quality/distribution from train-set cells')
@@ -177,28 +206,45 @@ class BaseModel(nn.Module):
         logging.info('Training ...')
         self.training_loss = []
         self.testing_loss = []
+        early_stopper = EarlyStopping(tolerance= tolerance, patience=3)
 
         self.train()
+        self.num_epochs_trained = 1
         try:
-            for epoch in range(1, num_epochs + 1):
+            t = tqdm.trange(num_epochs, desc = 'Epoch 0', leave = True)
+            for epoch in t:
                 running_loss = 0.0
                 for batch in self._get_batches(X[train_set], batch_size = batch_size):
                     loss = self.svi.step(*batch)
                     running_loss += loss
                 
-                epoch_loss = running_loss/train_set.sum()
+                epoch_loss = running_loss/(train_set.sum() * self.num_exog_features)
                 self.training_loss.append(epoch_loss)
-                logging.info('Epoch {}/{} complete. Training loss: {:.3e}'.format(str(epoch), str(num_epochs), epoch_loss))
 
+                self.num_epochs_trained+=1
+
+                loss_type = 'training'
                 if (epoch % eval_every == 0 or epoch == num_epochs) and test_set.sum() > 0:
                     self.eval()
-                    test_loss = self.get_logp(X[test_set])/test_set.sum()
-                    logging.info('Test loss: {:.4e}'.format(test_loss))
+                    test_loss = self.get_logp(X[test_set])/(test_set.sum() * self.num_exog_features)
                     self.train()
                     self.testing_loss.append(test_loss)
+                    recent_losses = self.testing_loss[-5:]
+                    loss_type = 'testing'
+                    if early_stopper.should_stop_training(test_loss):
+                        break
+
+                else:
+                    recent_losses = self.training_loss[-5:]
+
+                t.set_description("Epoch {} done. Recent {} losses: {}".format(
+                    str(epoch + 1),
+                    loss_type,
+                    ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
+                ))
 
         except KeyboardInterrupt:
-            logging.error('Interrupted training.')
+            logging.warn('Interrupted training.')
 
         self.eval()
         self.set_device('cpu')

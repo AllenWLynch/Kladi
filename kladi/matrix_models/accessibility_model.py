@@ -19,6 +19,7 @@ import requests
 import json
 from lisa.core.utils import indices_list_to_sparse_array
 import logging
+from lisa import FromRegions
 
 
 class DANEncoder(nn.Module):
@@ -72,10 +73,13 @@ class AccessibilityModel(BaseModel):
         dropout = 0.2, hidden = 128, use_cuda = True):
 
         assert(isinstance(peaks, (list, np.ndarray)))
+        if isinstance(peaks, list):
+            peaks = np.array(peaks)
         assert(len(peaks.shape) == 2)
         
         self.num_features = len(peaks)
         self.peaks = np.array(peaks)
+        self.num_exog_features = len(self.peaks)
         super().__init__(self.num_features, 
             DANEncoder(self.num_features, num_modules, hidden, dropout), 
             Decoder(self.num_features, num_modules, dropout), 
@@ -172,7 +176,7 @@ class AccessibilityModel(BaseModel):
         accessibility_matrix = accessibility_matrix.tocsr()
         read_depth = torch.from_numpy(np.array(accessibility_matrix.sum(-1))).to(self.device)
 
-        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = True):
+        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = False):
 
             rd_batch = read_depth[batch_start:batch_end]
             idx_batch = torch.from_numpy(self._get_padded_idx_matrix(accessibility_matrix[batch_start : batch_end], rd_batch)).to(self.device)
@@ -186,15 +190,15 @@ class AccessibilityModel(BaseModel):
         state_dict['peaks'] = self.peaks
         
         try:
-            self.motif_hits
+            self.factor_hits
         except AttributeError:
             pass
         else:
             motif_dictionary = dict(
-                indptr = self.motif_hits.indptr,
-                indices = self.motif_hits.indices,
-                score = self.motif_hits.data,
-                ids = self.motif_ids,
+                indptr = self.factor_hits.indptr,
+                indices = self.factor_hits.indices,
+                score = self.factor_hits.data,
+                ids = self.factor_ids,
                 factor_names = self.factor_names,
             )
             state_dict['motifs'] = motif_dictionary
@@ -209,9 +213,9 @@ class AccessibilityModel(BaseModel):
         self.set_device('cpu')
 
         if 'motifs' in state:
-            self.motif_ids = state['motifs']['ids']
+            self.factor_ids = state['motifs']['ids']
             self.factor_names = state['motifs']['factor_names']
-            self.motif_hits = sparse.csr_matrix((state['motifs']['score'], state['motifs']['indices'], state['motifs']['indptr']), shape = (len(self.motif_ids), len(self.peaks)))
+            self.factor_hits = sparse.csr_matrix((state['motifs']['score'], state['motifs']['indices'], state['motifs']['indptr']), shape = (len(self.factor_ids), len(self.peaks)))
 
 
     def _argsort_peaks(self, module_num):
@@ -245,34 +249,48 @@ class AccessibilityModel(BaseModel):
 
     def get_motif_hits_in_peaks(self, genome_fasta, p_value_threshold = 0.00005):
         
-        self.motif_hits, self.motif_ids, self.factor_names = moods_scan.get_motif_enrichments(self.peaks.tolist(), genome_fasta, pvalue_threshold = p_value_threshold)
+        self.factor_hits, self.factor_ids, self.factor_names = moods_scan.get_motif_enrichments(self.peaks.tolist(), genome_fasta, pvalue_threshold = p_value_threshold)
+
+    def get_ChIP_hits_in_peaks(self, species):
+
+        regions_test = FromRegions(species, self.peaks.tolist())
+
+        chip_hits, sample_ids, metadata = regions_test._load_factor_binding_data()
+
+        bin_map = np.hstack([np.arange(chip_hits.shape[0])[:,np.newaxis], regions_test.region_score_map[:, np.newaxis]])
+
+        new_hits = regions_test.data_interface.project_sparse_matrix(chip_hits, bin_map, num_bins=len(self.peaks))
+
+        self.factor_hits = new_hits.T.tocsr()
+        self.factor_names = list(metadata['factor'])
+        self.factor_ids = list(sample_ids)
 
 
     def get_motif_score(self, latent_compositions):
 
         try:
-            self.motif_hits
+            self.factor_hits
         except AttributeError:
             raise Exception('Motif hits not yet calculated, run "get_motif_hits_in_peaks" function first!')
 
-        hits_matrix = self._validate_hits_matrix(self.motif_hits)
+        hits_matrix = self._validate_hits_matrix(self.factor_hits)
 
         motif_scores = np.vstack([hits_matrix.dot(np.log(peak_probabilities).T).T
             for peak_probabilities in self._batch_impute(latent_compositions)])
 
         motif_scores = scale(motif_scores/np.linalg.norm(motif_scores, axis = 1, keepdims = True))
 
-        return list(zip(self.motif_ids, self.factor_names)), motif_scores
+        return list(zip(self.factor_ids, self.factor_names)), motif_scores
 
 
     def enrich_TFs(self, module_num, top_quantile = 0.2):
 
         try:
-            self.motif_hits
+            self.factor_hits
         except AttributeError:
             raise Exception('Motif hits not yet calculated, run "get_motif_hits_in_peaks" function first!')
 
-        hits_matrix = self._validate_hits_matrix(self.motif_hits)
+        hits_matrix = self._validate_hits_matrix(self.factor_hits)
         assert(isinstance(top_quantile, float) and top_quantile > 0 and top_quantile < 1)
 
         module_idx = self._argsort_peaks(module_num)[-int(self.num_features*top_quantile) : ]
@@ -292,7 +310,7 @@ class AccessibilityModel(BaseModel):
             pvals.append(pval)
             test_statistics.append(stat)
 
-        return sorted(list(zip(self.motif_ids, self.factor_names, pvals, test_statistics)), key = lambda x:(x[2], -x[3]))
+        return sorted(list(zip(self.factor_ids, self.factor_names, pvals, test_statistics)), key = lambda x:(x[2], -x[3]))
 
 
     def _insilico_deletion(self, gene_models, deletion_masks, latent_compositions):
