@@ -70,7 +70,7 @@ class Decoder(nn.Module):
 class AccessibilityModel(BaseModel):
 
     def __init__(self, peaks, num_modules = 15, initial_counts = 15, 
-        dropout = 0.2, hidden = 128, use_cuda = True):
+        dropout = 0.2, hidden = 128, use_cuda = True, highly_variable = None):
 
         assert(isinstance(peaks, (list, np.ndarray)))
         if isinstance(peaks, list):
@@ -80,6 +80,7 @@ class AccessibilityModel(BaseModel):
         self.num_features = len(peaks)
         self.peaks = np.array(peaks)
         self.num_exog_features = len(self.peaks)
+        self.highly_variable = highly_variable
         super().__init__(self.num_features, 
             DANEncoder(self.num_features, num_modules, hidden, dropout), 
             Decoder(self.num_features, num_modules, dropout), 

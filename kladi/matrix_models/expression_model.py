@@ -125,135 +125,12 @@ class ExpressionDecoder(nn.Module):
         # the output is σ(βθ)
         return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
 
-DEFAULTS = {param : float(config.get('ExpressionModel', param)) for param in ['learning_rate','lr_decay','tolerance','patience']}
+#DEFAULTS = {param : float(config.get('ExpressionModel', param)) for param in ['learning_rate','lr_decay','tolerance','patience']}
 
 class ExpressionModel(BaseModel):
-
-    @classmethod
-    def param_search(cls,*,counts, genes, num_modules, highly_variable = None, initial_counts = 15, dropout = 0.2, hidden = 128, use_cuda = True,
-        num_epochs = 200, batch_size = 32, test_proportion = 0.2, learning_rate = DEFAULTS['learning_rate'], lr_decay = DEFAULTS['lr_decay'], patience = int(DEFAULTS['patience']),
-        tolerance = DEFAULTS['tolerance'],
-    ):
-        '''
-        Parameter search over possible numbers of modules to describe data. Instantiates and trains models with a test set, then returns statistics for each model trained.
-
-        Example:
-
-            model_stats = ExpressionModel.param_search(
-                counts = adata.X, genes = adata.var_names, highly_variable = adata.var.highly_variable.values,           
-            )
-
-        Args:
-            counts (scipy.sparsematrix or np.ndarray): Cells x genes count matrix of raw transcript counts. Can be any datatype but will be checked for lossless conversion to integer.
-            genes (list, np.ndarray): Gene names / column names for count matrix, length must match dimension 2 of count matrix
-            num_modules (list): list of module nums to try
-            highly_variable (np.ndarray): boolean mask of same length as ``genes``. Genes flagged with ``True`` will be used as features for encoder. All genes will be used as features for decoder.
-                This allows one to impute many genes while only learning modules on highly variable genes, decreasing model complexity and training time.
-            initial_counts (int): sparsity parameter, related to pseudocounts of dirichlet prior. Increasing will lead to denser cell latent variables, decreasing will lead to more sparse latent variables.
-            dropout (float between 0,1): dropout rate for model.
-            hidden (int): number of nodes in encoder hidden layers.
-            use_cuda (bool): use CUDA to accelerate training on GPU (if GPU is available).
-            num_epochs (int > 0): maximum number of epochs to train for. Larger datasets will need fewer epochs.
-            batch_size (int > 0): number of samples per batch. 
-            learning_rate (float > 0): learning rate of ADAM optimizer.
-            test_proportion (float between 0,1): proportion of data to reserve for test set.
-            lr_decay (float between 0,1): per epoch multiplier for learning rate, reduces learning rate over time.
-            tolerance (float): Tolerance for early stopping criteria. Increasing tolerance will cause model training to stop earlier.
-            patience (int > 0): Number of epochs to wait for improvement before stopping training
-
-        Returns:
-            model_stats (dict): Dictionary with keys as number of modules, and values as dictionary with training loss, testing loss, and number of epochs trained.
-        '''
-        
-        assert(isinstance(num_modules, (list, np.ndarray)))
-        model_stats = {}
-
-        for K in num_modules:
-            assert(isinstance(K, int) and K > 0)
-            logging.info('----------------------------------')
-            logging.info('Training model with {} modules ...'.format(str(K)))
-            
-            test_model = cls(genes, highly_variable = highly_variable, num_modules=K, initial_counts = initial_counts, dropout=dropout, hidden=hidden, use_cuda=use_cuda)
-            test_model.fit(counts, num_epochs = num_epochs, batch_size = batch_size, learning_rate = learning_rate, patience = patience,
-                test_proportion = test_proportion, use_validation_set = True, lr_decay = lr_decay, tolerance = tolerance)
-
-            model_stats[K] = dict(
-                testing_loss = test_model.testing_loss,
-                training_loss = test_model.training_loss,
-                num_epochs = test_model.num_epochs_trained
-            )
-            del test_model
-
-        return model_stats
-
-
-    @classmethod
-    def plot_model_losses(cls, model_stats, 
-        num_models_per_row = 4, height = 4, aspect = 1.5, return_fig = False):
-        '''
-        Plots the training and testing loss for each epoch for each model from ``param_search``. 
-
-        Args:
-            model_stats: output from ``param_search`` function. Dictionary of loss statistics from training.
-            num_models_per_row (int): number of plots per row.
-            height (int): height of each plot
-            aspect (float): multiplier for width of plot (width = aspect * height)
-            return_fig (bool): whether to return figure and axes objects
-
-        Returns:
-            fig, ax (if return_fig = True): matplotlib figure and axes objects, respectively
-        '''
-
-        def _loss_plot(ax, model_num):
-
-            model_testing_loss = model_stats[model_num]['testing_loss']
-            model_training_loss = model_stats[model_num]['training_loss']
-            assert(len(model_testing_loss) == len(model_training_loss))
-
-            ax.plot(np.arange(len(model_testing_loss)), model_testing_loss, label = 'Test Loss')
-            ax.plot(np.arange(len(model_testing_loss)), model_training_loss, label = 'Train Loss')
-
-            ax.legend()
-            ax.set(xlabel = 'Epoch Num', ylabel = 'Loss', title = '{} Topics'.format(str(model_num)))
-            ax.set_yscale('log')
-            ax.set_xscale('log')
-            ax.spines["right"].set_visible(False)
-            ax.spines["top"].set_visible(False)
-
-        fig, ax = map_plot(_loss_plot, sorted(model_stats.keys()), height = height, aspect = aspect, 
-            plots_per_row = num_models_per_row)
-
-        if return_fig:
-            return fig, ax
-
-    @classmethod
-    def plot_final_test_loss(cls, model_stats, ax = None, figsize = (10,7)):
-        '''
-        Plots the minimum test loss achieved by model vs the number of modules
-
-        Args:
-            ax (matplotlib.axes.Axes): matplotlib axes object
-            figsize (tuple of (float, float)): size of plot
-
-        Returns:
-            matplotlib.axes.Axes
-        '''
-
-        if ax is None:
-            fig, ax = plt.subplots(1,1,figsize = figsize)
-
-        x,y = list(zip(*[
-            (module_num, np.min(stats['testing_loss'])) for module_num, stats in model_stats.items()
-        ]))
-
-        ax.scatter(x,y)
-        ax.set(title= 'Final Test Loss', xlabel = 'Num Modules', ylabel = 'Loss')
-        ax.set_yscale('log')
-        ax.spines["right"].set_visible(False)
-        ax.spines["top"].set_visible(False)
-
-        return ax
-
+    '''
+    Class
+    '''
 
     def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 15, 
         dropout = 0.2, hidden = 128, use_cuda = True):
@@ -275,7 +152,7 @@ class ExpressionModel(BaseModel):
             genes (list, np.ndarray): Gene names / column names for count matrix, length must match dimension 2 of count matrix
             highly_variable (np.ndarray): boolean mask of same length as ``genes``. Genes flagged with ``True`` will be used as features for encoder. All genes will be used as features for decoder.
                 This allows one to impute many genes while only learning modules on highly variable genes, decreasing model complexity and training time.
-            num_modules (list): number of gene modules to find
+            num_modules (int): number of gene modules to find
             initial_counts (int): sparsity parameter, related to pseudocounts of dirichlet prior. Increasing will lead to denser cell latent variables, decreasing will lead to more sparse latent variables.
             dropout (float between 0,1): dropout rate for model.
             hidden (int): number of nodes in encoder hidden layers.
@@ -308,22 +185,12 @@ class ExpressionModel(BaseModel):
             num_topics = num_modules, initial_counts = initial_counts, 
             hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
-
-    def fit(self, X, num_epochs = 100, batch_size = 32, test_proportion = 0.05, use_validation_set = False, learning_rate = DEFAULTS['learning_rate'], 
-        lr_decay = DEFAULTS['lr_decay'], patience = int(DEFAULTS['patience']), tolerance = DEFAULTS['tolerance']):
-
-        super().fit(
-            X, num_epochs=num_epochs, batch_size=batch_size, test_proportion=test_proportion, use_validation_set=use_validation_set,
-            learning_rate=learning_rate, lr_decay=lr_decay, patience=patience,tolerance=tolerance
-        )
-
-
     def model(self, raw_expr, encoded_expr, read_depth):
 
         pyro.module("decoder", self.decoder)
 
-        dispersion = pyro.param("dispersion", torch.tensor(5.).to(self.device) * torch.ones(self.num_genes).to(self.device), 
-            constraint = constraints.positive)
+        self.dispersion = pyro.param("dispersion", torch.tensor(5.) * torch.ones(self.num_genes), 
+            constraint = constraints.positive).to(self.device)
         
         with pyro.plate("cells", encoded_expr.shape[0]):
 
@@ -344,10 +211,12 @@ class ExpressionModel(BaseModel):
             expr_rate, dropout = self.decoder(theta)
 
             mu = torch.multiply(read_scale, expr_rate)
-            p = torch.minimum(mu / (mu + dispersion), self.max_prob)
+
+            #print(mu.device, self.dispersion.device, self.max_prob.device)
+            p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
 
             pyro.sample('obs', 
-                        dist.ZeroInflatedNegativeBinomial(total_count=dispersion, probs=p, gate_logits=dropout).to_event(1),
+                        dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
                         obs= raw_expr)
 
 
@@ -571,7 +440,7 @@ class ExpressionModel(BaseModel):
         list_id = json.loads(response.text)['userListId']
         return list_id
 
-    def get_ongology(self, list_id, ontology = 'WikiPathways_2019_Human'):
+    def get_ontology(self, list_id, ontology = 'WikiPathways_2019_Human'):
         '''
         Fetches the gene-set enrichments for a genelist in a certain ontology from Enrichr
 
@@ -607,7 +476,7 @@ class ExpressionModel(BaseModel):
 
         headers = config.get('Enrichr','results_headers').split(',')
         
-        return {ontology : dict(zip(headers, x)) for x in data}
+        return {ontology : [dict(zip(headers, x)) for x in data]}
 
 
     def get_enrichments(self, list_id, ontologies = config.get('Enrichr','ontologies').split(',')):
@@ -639,7 +508,7 @@ class ExpressionModel(BaseModel):
 
         enrichments = dict()
         for ontology in ontologies:
-            enrichments.update(self.get_ongology(list_id, ontology=ontology))
+            enrichments.update(self.get_ontology(list_id, ontology=ontology))
 
         return enrichments
 
@@ -653,7 +522,7 @@ class ExpressionModel(BaseModel):
             terms.append(
                 compact_string(result['term'])
             )        
-            genes.append(' '.join(result['genes']))
+            genes.append(' '.join(result['genes'][:max_genes]))
             pvals.append(-np.log10(result['pvalue']))
             
         ax.barh(np.arange(len(terms)), pvals, color=barcolor)
@@ -668,13 +537,37 @@ class ExpressionModel(BaseModel):
         
         if show_genes:
             for j, p in enumerate(ax.patches):
-                #_x = p.get_x() + p.get_width()
                 _y = p.get_y() + p.get_height() - p.get_height()/3
-                ax.text(0.1, _y, compact_string(genes[j][:, max_genes], max_wordlen=10, join_spacer = ', '), ha="left", color = text_color)
+                ax.text(0.1, _y, compact_string(genes[j], max_wordlen=10, join_spacer = ', '), ha="left", color = text_color)
 
 
     def plot_enrichments(self, enrichment_results, show_genes = True, show_top = 5, barcolor = 'lightgrey',
-        text_color = 'black', return_fig = False, enrichments_per_row = 2, height = 4, aspect = 1.5, max_genes = 15):
+        text_color = 'black', return_fig = False, enrichments_per_row = 2, height = 4, aspect = 2.5, max_genes = 15):
+        '''
+        Make plot of geneset enrichments given results from ``get_ontology`` or ``get_enrichments``.
+
+        Example:
+
+            post_id = expr_model.post_genelist(0, top_n_genes = 250) #post top 250 module 0 genes
+            enrichments = expr_model.get_enrichments(post_id)
+            expr_model.plot_enrichments(enrichments)
+
+        Args:
+            enrichment_results (dict): output from ``get_ontology`` or ``get_enrichments``
+            show_genes (bool): overlay gene names on top of bars
+            show_top (int): plot top n enrichment results
+            barcolor (color): color of barplot bars
+            text_color (text_color): color of text on barplot bars
+            return_fig (bool): return fig and axes objects
+            enrichments_per_row (int): number of plots per row
+            height (float): height of each plot
+            aspect (float): multiplier for width of each plot, width = aspect * height
+            max_genes (int): maximum number of genes to display on bar
+
+        Returns (if return_fig is True):
+            matplotlib.figure, matplotlib.axes.Axes
+
+        '''
         
         func = partial(self._enrichment_plot, text_color = text_color, 
             show_top = show_top, barcolor = barcolor, show_genes = show_genes, max_genes = max_genes)

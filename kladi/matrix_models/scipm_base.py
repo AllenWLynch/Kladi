@@ -1,5 +1,7 @@
 
 
+from functools import partial
+from kladi.matrix_models.estimator import ModuleEstimator
 import os
 import pyro
 import pyro.distributions as dist
@@ -12,10 +14,11 @@ from tqdm import tqdm, trange
 from pyro.nn import PyroModule
 import numpy as np
 import torch.distributions.constraints as constraints
-from pyro.infer import Predictive
 import logging
-import pickle
 from kladi.matrix_models.ilr import ilr
+import configparser
+from sklearn.model_selection import RandomizedSearchCV, ShuffleSplit
+
 
 class EarlyStopping:
 
@@ -44,7 +47,114 @@ class EarlyStopping:
 
 class BaseModel(nn.Module):
 
-    encoder_features_index = 1
+    @classmethod
+    def bayesian_tune(cls,*, X, features, highly_variable=None,
+        batch_size = 32, num_epochs =200, use_cuda = True, n_fits_per_model = 3, test_proportion = 0.2, num_fits = 50, verbose = 3):
+        ''' 
+        Use Bayesian Optimization search parameter space for most optimal hyperparameter combinations. Will take fewer steps to find optimal model than a comprehensive sweep using GridSearchCV,
+        and may find more optimal model in same amount of time compared to RandomSearchCV.
+
+        Args:
+
+        Args marked with * are optimized by random search
+
+            Model structure:
+                X (np.darrary, scipy.sparsematrix): count matrix, raw GEX counts or peak-count matrix
+                features (np.darray, list): feature names,
+                    for scRNA-seq: list of gene symbols corresponding to columns of count matrix
+                    for scATAC-seq: list of format [(chr, start, end), ...] for each peak/column of peak-count matrix. Alternatively, user may pass list of ['chr:start-end', ...] for each peak.
+                highly_variable (np.ndarray): for expression model only, boolean mask of same length as ``genes``. Genes flagged with ``True`` will be used as features for encoder. All genes will be used as features for decoder.
+                    This allows one to impute many genes while only learning modules on highly variable genes, decreasing model complexity and training time.
+            
+            Training:
+                batch_size (int): batch size for model
+                num_epochs (int): maximum number of epochs for training
+                use_cuda (bool): use CUDA to accelerate training on GPU (if GPU is available)
+
+            RandomSearch:
+                n_fits_per_model (int): number of partitions of dataset for cross-validation
+                test_proportion (float between 0,1): proportion of dataset to partition into test set for each fit
+                num_fits: number of hyperparameter combinations to try
+                verbose: verbosity of RandomSearchCV
+
+        Returns:
+            (ExpressionModel): Best model trained from random search
+            (skopt.BayesianCV): CV object
+
+        '''
+        raise NotImplementedError()
+
+
+    @classmethod
+    def random_tune(cls,*, X, features,highly_variable = None,
+        num_modules = [5,10,15,20,25,30,35], dropout = [0.2,0.25,0.3,0.4], intitial_counts = [10,15,20,30,50], 
+        hidden = [64,128,256], learning_rate = [0.1,0.005,0.01], lr_decay = [0.95,0.9,0.85,0.8], tolerance = [1e-4,1e-3], 
+        batch_size = 32, num_epochs = 200, use_cuda = True,
+        n_fits_per_model = 3, test_proportion = 0.2, num_fits = 50, verbose = 3):
+        ''' 
+        Use random search to search space for best hyperparameters for dataset. Returns best model trained and sklearn CV object with training results.
+        Some parameters passed to this method may be optimized, others are fixed by user.
+
+        Args:
+
+        Args marked with * are optimized by random search
+
+            Model structure:
+                X (np.darrary, scipy.sparsematrix): count matrix, raw GEX counts or peak-count matrix
+                features (np.darray, list): feature names,
+                    for scRNA-seq: list of gene symbols corresponding to columns of count matrix
+                    for scATAC-seq: list of format [(chr, start, end), ...] for each peak/column of peak-count matrix. Alternatively, user may pass list of ['chr:start-end', ...] for each peak.
+                highly_variable (np.ndarray): for expression model only, boolean mask of same length as ``genes``. Genes flagged with ``True`` will be used as features for encoder. All genes will be used as features for decoder.
+                    This allows one to impute many genes while only learning modules on highly variable genes, decreasing model complexity and training time.
+                num_modules* (list of int): list of number of gene modules
+                initial_counts* (list of int): list of sparsity parameters, related to pseudocounts of dirichlet prior. Increasing will lead to denser cell latent variables, decreasing will lead to more sparse latent variables.
+                dropout* (list of float between 0,1): list of dropout rates for model
+                hidden* (list of int): list of number of nodes in encoder hidden layers
+
+            Training:
+                learning_rate* (list of float): list of model learning rates
+                lr_decay* (list of float): list per epoch decay of learning rate
+                tolerance* (list of float): list of stop criterion for model training
+                batch_size (int): batch size for model
+                num_epochs (int): maximum number of epochs for training
+                use_cuda (bool): use CUDA to accelerate training on GPU (if GPU is available)
+
+            RandomSearch:
+                n_fits_per_model (int): number of partitions of dataset for cross-validation
+                test_proportion (float between 0,1): proportion of dataset to partition into test set for each fit
+                num_fits: number of hyperparameter combinations to try
+                verbose: verbosity of RandomSearchCV
+
+        Returns:
+            (ExpressionModel): Best model trained from random search
+            (sklearn.model_selection.RandomSearchCV): CV object
+
+        '''
+
+        params = dict(
+            num_module = num_modules,
+            dropout = dropout,
+            initial_counts = intitial_counts,
+            hidden = hidden,
+            learning_rate = learning_rate,
+            lr_decay = lr_decay,
+            tolerance = tolerance
+        )
+
+        estimator = ModuleEstimator(base_estimator = cls, highly_variable = highly_variable,
+            features = features, num_epochs = num_epochs, batch_size = batch_size, use_cuda = use_cuda)
+
+        cv = RandomizedSearchCV(
+                estimator,
+                params,
+                verbose = verbose,
+                num_iter = num_fits,
+                cv = ShuffleSplit(n_splits = n_fits_per_model, test_size = test_proportion),
+                refit = True,
+        ).fit(X)
+
+        return cv.best_estimator_.estimator, cv
+
 
     def __init__(self, num_features, encoder_model, decoder_model, num_topics=15, initial_counts = 15, dropout = 0.2, hidden = 128, use_cuda = True):
         super().__init__()
@@ -69,6 +179,12 @@ class BaseModel(nn.Module):
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.to(self.device)
         self.max_prob = torch.tensor([0.99999], requires_grad = False).to(self.device)
+        self.training_bar = True
+
+
+    @staticmethod
+    def get_num_batches(N, batch_size):
+        return N//batch_size + int(N % batch_size > 0)
 
     @staticmethod
     def _iterate_batch_idx(N, batch_size, bar = False):
@@ -139,7 +255,8 @@ class BaseModel(nn.Module):
     def set_device(self, device):
         logging.info('Moving model to device: {}'.format(device))
         self.device = device
-        self.to(self.device)
+        self = self.to(self.device)
+        self.max_prob = self.max_prob.to(self.device)
 
 
     def _get_latent_MAP(self, *data):
@@ -167,9 +284,12 @@ class BaseModel(nn.Module):
     def _validate_data(self):
         raise NotImplementedError()
 
+    @staticmethod
+    def _warmup_lr_decay(epoch,*,n_batches, lr_decay):
+        return min(1., epoch/n_batches)*(lr_decay**int(epoch/n_batches))
 
-    def fit(self, X,*, num_epochs, batch_size, test_proportion, use_validation_set, learning_rate, tolerance,
-        lr_decay, patience):
+    def fit(self, X,*, num_epochs = 200, batch_size = 32, test_proportion = 0.2, learning_rate = 0.1, tolerance = 1e-4,
+        lr_decay = 0.9, patience = 4):
 
         eval_every = 1
         assert(isinstance(num_epochs, int) and num_epochs > 0)
@@ -177,82 +297,74 @@ class BaseModel(nn.Module):
         assert(isinstance(learning_rate, float) and learning_rate > 0)
         assert(isinstance(eval_every, int) and eval_every > 0)
         assert(isinstance(test_proportion, float) and test_proportion >= 0 and test_proportion < 1)
-        assert(isinstance(use_validation_set, bool))
 
         seed = 2556
         torch.manual_seed(seed)
         pyro.set_rng_seed(seed)
         np.random.seed(seed)
-        # set numpy random seed
 
         pyro.clear_param_store()
         logging.info('Validating data ...')
 
         X = self._validate_data(X)
         n_observations = X.shape[0]
+        n_batches = self.get_num_batches(n_observations, batch_size)
 
         logging.info('Initializing model ...')
 
-        scheduler = pyro.optim.ExponentialLR({'optimizer': Adam, 'optim_args': {'lr': learning_rate}, 'gamma': lr_decay})
+        #scheduler = pyro.optim.ExponentialLR({'optimizer': Adam, 'optim_args': {'lr': learning_rate}, 'gamma': lr_decay})
+        lr_function = partial(self._warmup_lr_decay, n_batches = n_batches, lr_decay = lr_decay)
+        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': learning_rate}, 
+            'lr_lambda' : lambda e : lr_function(e)})
+
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 
-        if use_validation_set:
-            #logging.warn('Using hold-out set of cells for validation loss. When computing your final model, set "use_validation_set" to False so that all cells are used in computaiton of latent variables. This ensures that holdout-set cells\' latent variables do not have different quality/distribution from train-set cells')
-            test_set = np.random.rand(n_observations) < test_proportion
-            logging.info("Training with {} cells, testing with {}.".format(str((~test_set).sum()), str(test_set.sum())))
-        else:
-            test_set = np.zeros(n_observations).astype(np.bool)
-        train_set = ~test_set
-
-        logging.info('Training ...')
-        self.training_loss = []
-        self.testing_loss = []
-
+        self.training_loss, self.learning_rate = [], []
         early_stopper = EarlyStopping(tolerance= tolerance, patience=patience)
 
-        self.train()
-        self.num_epochs_trained = 1
         try:
-            t = trange(num_epochs, desc = 'Epoch 0', leave = True)
+            if self.training_bar:
+                t = trange(num_epochs, desc = 'Epoch 0', leave = True)
+            else:
+                t = range(num_epochs)
+
+            batches_complete = 0
             for epoch in t:
+                
+                #train step
+                self.train()
                 running_loss = 0.0
-                for batch in self._get_batches(X[train_set], batch_size = batch_size):
+                for batch in self._get_batches(X, batch_size = batch_size):
                     loss = self.svi.step(*batch)
                     running_loss += loss
+                    batches_complete+=1
+                    scheduler.step()
+                    self.learning_rate.append(lr_function(batches_complete))
                 
-                epoch_loss = running_loss/(train_set.sum() * self.num_exog_features)
+                #epoch cleanup
+                epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
                 self.training_loss.append(epoch_loss)
 
-                self.num_epochs_trained+=1
+                if self.training_bar:
+                    t.set_description("Epoch {} done. Recent losses: {}".format(
+                        str(epoch + 1),
+                        ' --> '.join('{:.3e}'.format(loss) for loss in self.training_loss[-5:])
+                    ))
 
-                loss_type = 'training'
-                if (epoch % eval_every == 0 or epoch == num_epochs) and test_set.sum() > 0:
-                    self.eval()
-                    test_loss = self._get_logp(X[test_set])/(test_set.sum() * self.num_exog_features)
-                    self.train()
-                    self.testing_loss.append(test_loss)
-                    recent_losses = self.testing_loss[-5:]
-                    loss_type = 'testing'
-                    #print(test_loss)
-                    if early_stopper.should_stop_training(test_loss):
-                        logging.info('Stopped training early!')
-                        break
-
-                else:
-                    recent_losses = self.training_loss[-5:]
-
-                t.set_description("Epoch {} done. Recent {} losses: {}".format(
-                    str(epoch + 1),
-                    loss_type,
-                    ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
-                ))
+                if early_stopper.should_stop_training(epoch_loss):
+                    logging.info('Stopped training early!')
+                    break
 
         except KeyboardInterrupt:
             logging.warn('Interrupted training.')
 
-        self.eval()
         self.set_device('cpu')
+        self.eval()
         return self
+
+    def score(self, X):
+        self.eval()
+        return -self._get_logp(X)/(X.shape[0] * self.num_exog_features)
 
     def _to_tensor(self, val):
         return torch.tensor(val).to(self.device)
