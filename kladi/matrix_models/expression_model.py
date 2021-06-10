@@ -11,7 +11,7 @@ from tqdm import tqdm
 import warnings
 
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel
+from kladi.matrix_models.scipm_base import BaseModel, get_fc_stack
 import configparser
 import requests
 import json
@@ -80,7 +80,7 @@ class GeneDevianceModel:
         return np.nan_to_num(r_ij)
 
 
-class ExpressionEncoder(nn.Module):
+'''class ExpressionEncoder(nn.Module):
     # Base class for the encoder net, used in the guide
     # Base class for the encoder net, used in the guide
     def __init__(self, num_genes, num_topics, hidden, dropout):
@@ -108,7 +108,32 @@ class ExpressionEncoder(nn.Module):
         rd_loc = rd[:,0]
         rd_scale = F.softplus(rd[:,1]) #(0.5 * rd[:,1]).exp()
 
+        return theta_loc, theta_scale, rd_loc, rd_scale'''
+
+class ExpressionEncoder(nn.Module):
+
+    def __init__(self, num_genes, num_topics, hidden, dropout, num_layers):
+        super().__init__()
+        output_batchnorm_size = 2*num_topics + 2
+
+        self.num_topics = num_topics
+        self.fc_layers = get_fc_stack(
+            layer_dims = [num_genes + 1, *[hidden]*(num_layers-2), output_batchnorm_size],
+            dropout = dropout, skip_nonlin = True
+        )
+        
+    def forward(self, X):
+
+        X = self.fc_layers(X)
+
+        theta_loc = X[:, :self.num_topics]
+        theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])
+
+        rd_loc = X[:,-2].reshape((-1,1))
+        rd_scale = F.softplus(X[:,-1]).reshape((-1,1))
+
         return theta_loc, theta_scale, rd_loc, rd_scale
+
 
 class ExpressionDecoder(nn.Module):
     # Base class for the decoder net, used in the model
@@ -132,8 +157,8 @@ class ExpressionModel(BaseModel):
     Class
     '''
 
-    def __init__(self, genes, highly_variable = None, num_modules = 15, initial_counts = 15, 
-        dropout = 0.2, hidden = 128, use_cuda = True):
+    def __init__(self, genes, highly_variable = None, num_modules = 15, decoder_dropout = 0.2, 
+        encoder_dropout = 0.1, hidden = 128, use_cuda = True, num_layers = 3):
         '''
         Initialize ExpressionModel instance. 
 
@@ -180,10 +205,9 @@ class ExpressionModel(BaseModel):
         self.num_features = int(highly_variable.sum())
         
         super().__init__(self.num_features, 
-            ExpressionEncoder(self.num_features, num_modules, hidden, dropout), 
-            ExpressionDecoder(self.num_genes, num_modules, dropout), 
-            num_topics = num_modules, initial_counts = initial_counts, 
-            hidden = hidden, dropout = dropout, use_cuda = use_cuda)
+            ExpressionEncoder(self.num_features, num_modules, hidden, encoder_dropout, num_layers), 
+            ExpressionDecoder(self.num_genes, num_modules, decoder_dropout), 
+            num_topics = num_modules, use_cuda = use_cuda)
 
     def model(self, raw_expr, encoded_expr, read_depth):
 
@@ -191,12 +215,21 @@ class ExpressionModel(BaseModel):
 
         self.dispersion = pyro.param("dispersion", torch.tensor(5.) * torch.ones(self.num_genes), 
             constraint = constraints.positive).to(self.device)
+
+        _alpha, _beta = self._get_gamma_parameters(25., self.num_topics)
+        with pyro.plate("topics", self.num_topics):
+            initial_counts = pyro.sample("a", dist.Gamma(self._to_tensor(_alpha), self._to_tensor(_beta)))
+
+        theta_loc = self._get_prior_mu(initial_counts, self.K)
+        theta_scale = self._get_prior_std(initial_counts, self.K)
+
+        #print(theta_loc, theta_scale)
         
         with pyro.plate("cells", encoded_expr.shape[0]):
 
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
-            theta_loc = self.prior_mu * encoded_expr.new_ones((encoded_expr.shape[0], self.num_topics))
-            theta_scale = self.prior_std * encoded_expr.new_ones((encoded_expr.shape[0], self.num_topics))
+            #theta_loc = self.prior_mu * encoded_expr.new_ones((encoded_expr.shape[0], self.num_topics))
+            #theta_scale = self.prior_std * encoded_expr.new_ones((encoded_expr.shape[0], self.num_topics))
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
             theta = theta/theta.sum(-1, keepdim = True)
@@ -223,6 +256,14 @@ class ExpressionModel(BaseModel):
     def guide(self, raw_expr, encoded_expr, read_depth):
 
         pyro.module("encoder", self.encoder)
+
+        _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(25., self.num_topics))
+        counts_mu = pyro.param('counts_mu', _counts_mu * encoded_expr.new_ones((self.num_topics,))).to(self.device)
+        counts_std = pyro.param('counts_std', np.sqrt(_counts_var) * encoded_expr.new_ones((self.num_topics,)), 
+                constraint = constraints.positive).to(self.device)
+
+        with pyro.plate("topics", self.num_topics) as k:
+            initial_counts = pyro.sample("a", dist.LogNormal(counts_mu[k], counts_std[k]))
 
         with pyro.plate("cells", encoded_expr.shape[0]):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution,
