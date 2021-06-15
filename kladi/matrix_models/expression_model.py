@@ -80,36 +80,6 @@ class GeneDevianceModel:
         return np.nan_to_num(r_ij)
 
 
-'''class ExpressionEncoder(nn.Module):
-    # Base class for the encoder net, used in the guide
-    # Base class for the encoder net, used in the guide
-    def __init__(self, num_genes, num_topics, hidden, dropout):
-        super().__init__()
-        self.drop = nn.Dropout(dropout)  # to avoid component collapse
-        self.fc1 = nn.Linear(num_genes + 1, hidden)
-        self.fc2 = nn.Linear(hidden, hidden)
-        self.fcmu = nn.Linear(hidden, num_topics)
-        self.fclv = nn.Linear(hidden, num_topics)
-        self.fcrd = nn.Linear(hidden, 2)
-        self.bnmu = nn.BatchNorm1d(num_topics)  # to avoid component collapse
-        self.bnlv = nn.BatchNorm1d(num_topics)  # to avoid component collapse
-        self.bnrd = nn.BatchNorm1d(2)
-
-    def forward(self, inputs):
-        h = F.relu(self.fc1(inputs))
-        h = F.relu(self.fc2(h))
-        h = self.drop(h)
-        # μ and Σ are the outputs
-        theta_loc = self.bnmu(self.fcmu(h))
-        theta_scale = self.bnlv(self.fclv(h))
-        theta_scale = F.softplus(theta_scale) #(0.5 * theta_scale).exp()  # Enforces positivity
-        
-        rd = self.bnrd(self.fcrd(h))
-        rd_loc = rd[:,0]
-        rd_scale = F.softplus(rd[:,1]) #(0.5 * rd[:,1]).exp()
-
-        return theta_loc, theta_scale, rd_loc, rd_scale'''
-
 class ExpressionEncoder(nn.Module):
 
     def __init__(self, num_genes, num_topics, hidden, dropout, num_layers):
@@ -157,8 +127,10 @@ class ExpressionModel(BaseModel):
     Class
     '''
 
+    I = 50
+
     def __init__(self, genes, highly_variable = None, num_modules = 15, decoder_dropout = 0.2, 
-        encoder_dropout = 0.1, hidden = 128, use_cuda = True, num_layers = 3):
+        encoder_dropout = 0.15, hidden = 128, use_cuda = True, num_layers = 3, seed = None):
         '''
         Initialize ExpressionModel instance. 
 
@@ -207,7 +179,7 @@ class ExpressionModel(BaseModel):
         super().__init__(self.num_features, 
             ExpressionEncoder(self.num_features, num_modules, hidden, encoder_dropout, num_layers), 
             ExpressionDecoder(self.num_genes, num_modules, decoder_dropout), 
-            num_topics = num_modules, use_cuda = use_cuda)
+            num_topics = num_modules, use_cuda = use_cuda, seed = seed)
 
     def model(self, raw_expr, encoded_expr, read_depth):
 
@@ -216,7 +188,7 @@ class ExpressionModel(BaseModel):
         self.dispersion = pyro.param("dispersion", torch.tensor(5.) * torch.ones(self.num_genes), 
             constraint = constraints.positive).to(self.device)
 
-        _alpha, _beta = self._get_gamma_parameters(25., self.num_topics)
+        _alpha, _beta = self._get_gamma_parameters(self.I, self.num_topics)
         with pyro.plate("topics", self.num_topics):
             initial_counts = pyro.sample("a", dist.Gamma(self._to_tensor(_alpha), self._to_tensor(_beta)))
 
@@ -245,19 +217,22 @@ class ExpressionModel(BaseModel):
 
             mu = torch.multiply(read_scale, expr_rate)
 
-            #print(mu.device, self.dispersion.device, self.max_prob.device)
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
-
             pyro.sample('obs', 
                         dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
                         obs= raw_expr)
+            '''log_p_success = (mu + self.epsilon).log() - (mu + self.dispersion + self.epsilon).log()
+            logodds_p = log_p_success - (1 - torch.exp(log_p_success)).log()
+            pyro.sample('obs', 
+                            dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, logits = logodds_p, gate_logits=dropout).to_event(1),
+                            obs= raw_expr)'''
 
 
     def guide(self, raw_expr, encoded_expr, read_depth):
 
         pyro.module("encoder", self.encoder)
 
-        _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(25., self.num_topics))
+        _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
         counts_mu = pyro.param('counts_mu', _counts_mu * encoded_expr.new_ones((self.num_topics,))).to(self.device)
         counts_std = pyro.param('counts_std', np.sqrt(_counts_var) * encoded_expr.new_ones((self.num_topics,)), 
                 constraint = constraints.positive).to(self.device)
@@ -416,7 +391,7 @@ class ExpressionModel(BaseModel):
         '''
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
 
-        return self.genes[np.argsort(self._get_beta()[module_num, :])]
+        return self.genes[np.argsort(self._score_features()[module_num, :])]
 
     def get_top_genes(self, module_num, top_n = 200):
         '''
@@ -449,7 +424,7 @@ class ExpressionModel(BaseModel):
         assert(gene in self.genes)
 
         gene_idx = np.argwhere(self.genes == gene)[0]
-        return list(sorted(zip(range(self.num_topics), self._get_beta()[:, gene_idx]), key = lambda x : x[1]))
+        return list(sorted(zip(range(self.num_topics), self._score_features()[:, gene_idx]), key = lambda x : x[1]))
     
 
     def post_genelist(self, module_num, top_n_genes = 200):

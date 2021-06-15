@@ -20,6 +20,9 @@ import logging
 from kladi.matrix_models.ilr import ilr
 import configparser
 from math import ceil
+import time
+
+logger = logging.getLogger(__name__)
 
 class EarlyStopping:
 
@@ -70,22 +73,12 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
 
 class BaseModel(nn.Module):
 
-    @classmethod
-    def get_learning_rate_gradient(cls, model, X, batch_size = 32, eval_every = 20, test_epochs = 3, 
-        min_learning_rate = 1e-6, max_learning_rate = 1):
-
-        lr, loss = model._run_lr_gradient(X, num_epochs= test_epochs, eval_every= eval_every, batch_size=batch_size,
-            min_lr=min_learning_rate, max_lr=max_learning_rate)
-
-        return lr, loss
-
-
-    @classmethod
-    def plot_learning_rate_gradient(cls, learning_rate, loss):
-        pass
-
-    def __init__(self, num_features, encoder_model, decoder_model, num_topics=15, use_cuda = True):
+    def __init__(self, num_features, encoder_model, decoder_model, num_topics=15, use_cuda = True,
+        seed = None):
         super().__init__()
+
+        self._set_seeds(seed)
+        pyro.clear_param_store()
 
         assert(isinstance(use_cuda, bool))
         assert(isinstance(num_topics, int) and num_topics > 0)
@@ -97,10 +90,13 @@ class BaseModel(nn.Module):
         self.encoder = encoder_model
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
-        logging.info('Using CUDA: {}'.format(str(self.use_cuda)))
+        if not use_cuda:
+            logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
+            
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.max_prob = torch.tensor([0.99999], requires_grad = False)
         self.K = torch.tensor(self.num_topics, requires_grad = False)
+        self.epsilon = torch.tensor(5e-4, requires_grad = False)
         self.set_device(self.device)
         self.training_bar = True
 
@@ -166,12 +162,8 @@ class BaseModel(nn.Module):
 
         return np.array(batch_loss).sum() #loss is negative log-likelihood
 
-    def _numpy_forward(self, latent_comp):
-
-        activation = (np.dot(latent_comp, self._get_beta()) - self._get_bn_mean())/self._get_bn_var()
-        logit = self._get_gamma() * activation  + self._get_bias()
-
-        return np.exp(logit)/np.exp(logit).sum(-1, keepdims = True)
+    def _score_features(self):
+        return np.sign(self._get_gamma()) * self._get_beta()
     
     def _get_beta(self):
         # beta matrix elements are the weights of the FC layer on the decoder
@@ -199,16 +191,16 @@ class BaseModel(nn.Module):
         self.set_device('cpu')
 
     def set_device(self, device):
-        logging.info('Moving model to device: {}'.format(device))
+        logger.debug('Moving model to device: {}'.format(device))
         self.device = device
         self = self.to(self.device)
         self.max_prob = self.max_prob.to(self.device)
         self.K = self.K.to(self.device)
+        self.epsilon = self.epsilon.to(self.device)
 
 
     def _get_latent_MAP(self, *data):
         raise NotImplementedError()
-
 
     def predict(self, X, batch_size = 256):
 
@@ -216,7 +208,7 @@ class BaseModel(nn.Module):
         assert(isinstance(batch_size, int) and batch_size > 0)
         
         self.eval()
-        logging.info('Predicting latent variables ...')
+        logger.debug('Predicting latent variables ...')
         latent_vars = []
         for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, training = False)):
             latent_vars.append(self._get_latent_MAP(*batch))
@@ -236,41 +228,33 @@ class BaseModel(nn.Module):
         return min(1., epoch/n_batches)*(lr_decay**int(epoch/n_batches))
 
     @staticmethod
-    def _set_seeds(seed = 2556):
+    def _set_seeds(seed = None):
+        if seed is None:
+            seed = int(time.time() * 1e7)%(2**32-1)
+
         torch.manual_seed(seed)
         pyro.set_rng_seed(seed)
         np.random.seed(seed)
-        pyro.clear_param_store()
 
-    def get_training_params(self, X, num_epochs = 3, eval_every = 10, min_lr = 1e-6, max_lr = 1, batch_size = 32):
+    def _get_learning_rate_bounds(self, X, num_epochs = 3, eval_every = 10, 
+        min_learning_rate = 1e-6, max_learning_rate = 1, batch_size = 32):
     
-        self._set_seeds()
-
-        logging.info('Validating data ...')
         X = self._validate_data(X)
-        n_observations = X.shape[0]
-        n_batches = self.get_num_batches(n_observations, batch_size)
+        n_batches = self.get_num_batches(X.shape[0], batch_size)
 
-        logging.info('Initializing model ...')
-            
         eval_steps = ceil((n_batches * num_epochs)/eval_every)
-        learning_rates = np.exp(np.linspace(np.log(min_lr), np.log(max_lr), eval_steps+1))
+        learning_rates = np.exp(np.linspace(np.log(min_learning_rate), np.log(max_learning_rate), eval_steps+1))
 
         def lr_function(e):
             return learning_rates[e]/learning_rates[0]
-
         scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': learning_rates[0]}, 
             'lr_lambda' : lr_function})
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
-
-        batches_complete = 0
-        steps_complete = 0
-        step_loss = 0.0
+        batches_complete, steps_complete, step_loss = 0,0,0
         learning_rate_losses = []
         
         for epoch in range(num_epochs):
-
             #train step
             self.train()
             for batch in self._get_batches(X, batch_size = batch_size):
@@ -285,6 +269,68 @@ class BaseModel(nn.Module):
                     
         return np.array(learning_rates[:len(learning_rate_losses)]), np.array(learning_rate_losses)
 
+
+    @staticmethod
+    def _define_boundaries(learning_rate, loss):
+        
+        learning_rate = np.log(learning_rate)
+        bounds = learning_rate.min()-1, learning_rate.max()+1
+        
+        x = np.concatenate([[bounds[0]], learning_rate, [bounds[1]]])
+        y = np.concatenate([[loss.min()], loss, [loss.max()]])
+        spline_fit = interpolate.splrep(x, y, k = 5, s= 5)
+        
+        x_fit = np.linspace(*bounds, 100)
+        
+        first_div = interpolate.splev(x_fit, spline_fit, der = 1)
+        
+        cross_points = np.concatenate([[0], np.argwhere(np.abs(np.diff(np.sign(first_div))) > 0)[:,0], [len(first_div) - 1]])
+        longest_segment = np.argmax(np.diff(cross_points))
+        
+        left, right = cross_points[[longest_segment, longest_segment+1]]
+        
+        start, end = x_fit[[left, right]] + np.array([trim, -trim])
+        
+        optimal_lr = x_fit[left + first_div[left:right].argmin()]
+        
+        return np.exp(start), np.exp(end), np.exp(optimal_lr), spline_fit
+
+
+    def _estimate_num_epochs(self,*, X, test_X, test_learning_rate, batch_size = 32, max_epochs = 200,
+        tolerance = 1e-4, patience = 3):
+
+        X = self._validate_data(X)
+
+        test_lr = test_learning_rate
+
+        optimizer = pyro.optim.Adam(dict(lr = test_lr))
+        self.svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
+        self.epoch_loss = []
+        early_stopper = EarlyStopping(tolerance=tolerance, patience=patience)
+        self.num_epochs_trained = 0
+
+        t = trange(max_epochs, desc = 'Epoch 0', leave = True)
+        for epoch in t:
+            #train step
+            self.train()
+            for batch in self._get_batches(X, batch_size = batch_size):
+                self.svi.step(*batch)
+
+            self.epoch_loss.append(self.score(test_X))
+            self.num_epochs_trained+=1
+
+            t.set_description("Epoch {} done. Recent losses: {}".format(
+                        str(epoch + 1),
+                        ' --> '.join('{:.3e}'.format(loss) for loss in self.epoch_loss[-5:])
+                    ))
+
+            if early_stopper.should_stop_training(self.epoch_loss[-1]):
+                logger.info('Stopped training early!')
+                break
+            
+        return self.num_epochs_trained
+
+
     @staticmethod
     def _get_decay_rate(a1, a0, periods):
         return np.exp(
@@ -295,18 +341,19 @@ class BaseModel(nn.Module):
         epochs_per_cycle = None):
 
         if epochs_per_cycle is None:
-            epochs_per_cycle = 2
+            epochs_per_cycle = 4
 
         if decay is None:
-            #decay such that max_lr == min_lr after 1/2 * num_epochs iterations
-            decay = self._get_decay_rate(min_learning_rate, max_learning_rate, num_epochs/epochs_per_cycle)
+            #decay such that max_lr == min_lr after num_epochs iterations
+            decay = self._get_decay_rate(min_learning_rate, max_learning_rate, 2*num_epochs/epochs_per_cycle)
 
         return pyro.optim.CyclicLR({
                 'optimizer' : Adam,
                 'optim_args' : {'lr' : min_learning_rate},
-                'base_lr' : min_learning_rate, 'max_lr' : max_learning_rate, 'step_size_up' : int(epochs_per_cycle * n_batches_per_epoch), 
+                'base_lr' : min_learning_rate, 'max_lr' : max_learning_rate, 'step_size_up' : int(epochs_per_cycle/2 * n_batches_per_epoch), 
                 'mode' : 'exp_range', 'gamma' : decay, 'cycle_momentum' : False,
             })
+
 
     @staticmethod
     def _warmup_lr_decay(step,*,n_batches_per_epoch, lr_decay):
@@ -326,15 +373,83 @@ class BaseModel(nn.Module):
         
         return pyro.optim.lr_scheduler.PyroLRScheduler(OneCycleLR_Wrapper, 
             {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate}, 'max_lr' : max_learning_rate, 
-            'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 
+            'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 'div_factor' : max_learning_rate/min_learning_rate,
             'cycle_momentum' : False, 'three_phase' : False, 'verbose' : False})
 
     def get_coherence(self, module_num, counts):
         pass
-        
 
-    def fit(self, X,*, min_learning_rate, max_learning_rate = None, num_epochs = 200, batch_size = 32, tolerance = 1e-4,
-        policy = 'cyclicLR', triangle_decay = None, epochs_per_cycle = 2, test_X=None, patience = 3):
+    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, 
+        test_X=None, patience = 3, tolerance = 1e-4):
+
+        max_convergence_iters = 5
+        assert(isinstance(num_epochs, int) and num_epochs > 0)
+        assert(isinstance(batch_size, int) and batch_size > 0)
+        assert(isinstance(min_learning_rate, float) and min_learning_rate > 0)
+        if max_learning_rate is None:
+            max_learning_rate = min_learning_rate
+        else:
+            assert(isinstance(max_learning_rate, float) and max_learning_rate > 0)
+        
+        X = self._validate_data(X)
+        n_observations = X.shape[0]
+        n_batches = self.get_num_batches(n_observations, batch_size)
+
+        scheduler = self._get_1cycle_scheduler(min_learning_rate = min_learning_rate, max_learning_rate = max_learning_rate,
+            n_batches_per_epoch = n_batches, num_epochs = num_epochs)
+
+        self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
+
+        early_stopper = EarlyStopping(tolerance=tolerance, patience=patience)
+        self.training_loss, self.testing_loss, self.num_epochs_trained = [],[],0
+        try:
+
+            t = trange(num_epochs+1, desc = 'Epoch 0', leave = True) if self.training_bar else range(num_epochs+1)
+            _t = iter(t)
+            epoch = 0
+
+            while True:
+                #train step
+                self.train()
+                running_loss = 0.0
+                for batch in self._get_batches(X, batch_size = batch_size):
+                    running_loss += self.svi.step(*batch)
+                    if epoch < num_epochs:
+                        scheduler.step()
+                
+                #epoch cleanup
+                epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
+                self.training_loss.append(epoch_loss)
+                recent_losses = self.training_loss[-5:]
+
+                if not test_X is None:
+                    self.testing_loss.append(self.score(test_X))
+                    recent_losses = self.testing_loss[-5:]
+
+                if self.training_bar:
+                    t.set_description("Epoch {} done. Recent losses: {}".format(
+                        str(epoch + 1),
+                        ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
+                    ))
+
+                epoch+=1
+                try:
+                    next(_t)
+                except StopIteration:
+                    pass
+
+                if early_stopper.should_stop_training(recent_losses[-1]) and epoch > num_epochs:
+                    break
+
+        except KeyboardInterrupt:
+            logger.warn('Interrupted training.')
+
+        self.set_device('cpu')
+        self.eval()
+        return self
+
+    def options_fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, test_X=None,
+        policy = '1cycleLR', triangle_decay = None, epochs_per_cycle = None, patience = 3, tolerance = 1e-4):
 
         assert(isinstance(num_epochs, int) and num_epochs > 0)
         assert(isinstance(batch_size, int) and batch_size > 0)
@@ -343,15 +458,10 @@ class BaseModel(nn.Module):
             max_learning_rate = min_learning_rate
         else:
             assert(isinstance(max_learning_rate, float) and max_learning_rate > 0)
-
-        self._set_seeds()
         
-        logging.info('Validating data ...')
         X = self._validate_data(X)
         n_observations = X.shape[0]
         n_batches = self.get_num_batches(n_observations, batch_size)
-
-        logging.info('Initializing model ...')
 
         scheduler = None
         optim_kwargs = dict(
@@ -361,23 +471,24 @@ class BaseModel(nn.Module):
             num_epochs = num_epochs
         )
 
-        
         early_stopper = EarlyStopping(tolerance=tolerance, patience=patience)
 
         if policy == 'cyclicLR':
             scheduler = self._get_exp_range_scheduler(**optim_kwargs, epochs_per_cycle = epochs_per_cycle, decay = triangle_decay)
-            early_stopper = EarlyStopping(tolerance= tolerance, patience=1)
+            early_stopper = EarlyStopping(tolerance= tolerance, patience=0)
         elif policy == 'multiplicative_decay':
             scheduler = self._get_multiplicative_decay_scheduler(**optim_kwargs)    
         elif policy == '1cycleLR':
             scheduler = self._get_1cycle_scheduler(**optim_kwargs)
+        elif isinstance(policy, pyro.optim):
+            logger.info('Using user-provided optimizer')
+            scheduler = policy
         else:
             raise Exception('Mode {} is not valid'.format(str(policy)))
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 
-        self.training_loss, self.testing_loss = [],[]
-
+        self.training_loss, self.testing_loss, self.num_epochs_trained = [],[],0
         try:
             if self.training_bar:
                 t = trange(num_epochs, desc = 'Epoch 0', leave = True)
@@ -408,88 +519,22 @@ class BaseModel(nn.Module):
                         ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
                     ))
 
+                self.num_epochs_trained+=1
+
                 if policy == 'multiplicative_decay' \
-                    or (policy == 'cyclicLR' and epoch % (2*epochs_per_cycle) == 0)\
-                    or (policy == '1cycleLR' and epoch > num_epochs//2): 
+                    or (policy == 'cyclicLR' and epoch % epochs_per_cycle == 0):
+                    #or (policy == '1cycleLR' and epoch > (3*num_epochs)//4): don't do early stopping with 1cycleLR, tune #epochs
                     if early_stopper.should_stop_training(recent_losses[-1]):
-                        logging.info('Stopped training early!')
+                        logger.debug('Stopped training early')
                         break
 
         except KeyboardInterrupt:
-            logging.warn('Interrupted training.')
+            logger.warn('Interrupted training.')
 
         self.set_device('cpu')
         self.eval()
         return self
                 
-
-    '''def fit(self, X,*, num_epochs = 200, batch_size = 32, test_proportion = 0.2, learning_rate = 0.1, tolerance = 1e-4,
-        lr_decay = 0.9, patience = 4):
-
-        assert(isinstance(num_epochs, int) and num_epochs > 0)
-        assert(isinstance(batch_size, int) and batch_size > 0)
-        assert(isinstance(learning_rate, float) and learning_rate > 0)
-        assert(isinstance(test_proportion, float) and test_proportion >= 0 and test_proportion < 1)
-
-        self._set_seeds()
-        
-        logging.info('Validating data ...')
-        X = self._validate_data(X)
-        n_observations = X.shape[0]
-        n_batches = self.get_num_batches(n_observations, batch_size)
-
-        logging.info('Initializing model ...')
-
-        #scheduler = pyro.optim.ExponentialLR({'optimizer': Adam, 'optim_args': {'lr': learning_rate}, 'gamma': lr_decay})
-        lr_function = partial(self._warmup_lr_decay, n_batches = n_batches, lr_decay = lr_decay)
-        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': learning_rate}, 
-            'lr_lambda' : lambda e : lr_function(e)})
-
-        self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
-
-        self.training_loss, self.learning_rate = [], []
-        early_stopper = EarlyStopping(tolerance= tolerance, patience=patience)
-
-        try:
-            if self.training_bar:
-                t = trange(num_epochs, desc = 'Epoch 0', leave = True)
-            else:
-                t = range(num_epochs)
-
-            batches_complete = 0
-            for epoch in t:
-                
-                #train step
-                self.train()
-                running_loss = 0.0
-                for batch in self._get_batches(X, batch_size = batch_size):
-                    loss = self.svi.step(*batch)
-                    running_loss += loss
-                    batches_complete+=1
-                    scheduler.step()
-                    self.learning_rate.append(lr_function(batches_complete))
-                
-                #epoch cleanup
-                epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
-                self.training_loss.append(epoch_loss)
-
-                if self.training_bar:
-                    t.set_description("Epoch {} done. Recent losses: {}".format(
-                        str(epoch + 1),
-                        ' --> '.join('{:.3e}'.format(loss) for loss in self.training_loss[-5:])
-                    ))
-
-                if early_stopper.should_stop_training(epoch_loss):
-                    logging.info('Stopped training early!')
-                    break
-
-        except KeyboardInterrupt:
-            logging.warn('Interrupted training.')
-
-        self.set_device('cpu')
-        self.eval()
-        return self'''
-
     def score(self, X):
         self.eval()
         return self._get_logp(X)/(X.shape[0] * self.num_exog_features)
