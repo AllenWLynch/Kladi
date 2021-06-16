@@ -12,29 +12,40 @@ from sklearn.preprocessing import scale
 from scipy import sparse
 from scipy.stats import fisher_exact
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel
+from kladi.matrix_models.scipm_base import BaseModel, get_fc_stack
 from kladi.motif_scanning import moods_scan
-import configparser
-import requests
-import json
 from lisa.core.utils import indices_list_to_sparse_array
 import logging
 from lisa import FromRegions
+from torch.distributions.utils import broadcast_all
+
+
+class BinaryMultinomial(pyro.distributions.Multinomial):
+    
+    def log_prob(self, value):
+        if self._validate_args:
+            self._validate_sample(value)
+        logits, value = broadcast_all(self.logits, value)
+        logits = logits.clone(memory_format=torch.contiguous_format)
+        
+        log_factorial_n = torch.lgamma(value.shape[-1] + 1)
+        
+        log_powers = torch.gather(logits, -1, value).sum(-1)
+        return log_factorial_n + log_powers
 
 
 class DANEncoder(nn.Module):
 
-    def __init__(self, num_peaks, num_topics, hidden, dropout):
+    def __init__(self, num_peaks, num_topics, hidden, dropout, num_layers):
         super().__init__()
+
         self.drop = nn.Dropout(dropout)
-        self.drop2 = nn.Dropout(dropout)
-        self.embedding = nn.Embedding(num_peaks, hidden, padding_idx=0)
-        self.fc1 = nn.Linear(hidden + 1, hidden)
-        self.fc2 = nn.Linear(hidden, hidden)
-        self.fcmu = nn.Linear(hidden, num_topics)
-        self.fclv = nn.Linear(hidden, num_topics)
-        self.bnmu = nn.BatchNorm1d(num_topics)  # to avoid component collapse
-        self.bnlv = nn.BatchNorm1d(num_topics)  # to avoid component collapse
+        self.embedding = nn.Embedding(num_peaks, hidden//2, padding_idx=0)
+        self.num_topics = num_topics
+        self.fc_layers = get_fc_stack(
+            layer_dims = [hidden + 1, *[hidden]*(num_layers-2), 2*num_topics],
+            dropout = dropout, skip_nonlin = True
+        )
 
     def forward(self, idx, read_depth):
 
@@ -42,15 +53,13 @@ class DANEncoder(nn.Module):
         
         ave_embeddings = embeddings.sum(1)/read_depth
 
-        h = torch.cat([ave_embeddings, read_depth.log()], dim = 1) #inject read depth into model
-        h = F.relu(self.fc1(h))
-        h = F.relu(self.fc2(h))
-        h = self.drop2(h)
+        X = torch.cat([ave_embeddings, read_depth.log()], dim = 1) #inject read depth into model
 
-        # μ and Σ are the outputs
-        theta_loc = self.bnmu(self.fcmu(h))
-        theta_scale = self.bnlv(self.fclv(h))
-        theta_scale = F.softplus(theta_scale)  # Enforces positivity
+        X = self.fc_layers(X)
+
+        theta_loc = X[:, :self.num_topics]
+        theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])   
+
         return theta_loc, theta_scale
 
 class Decoder(nn.Module):
@@ -69,35 +78,40 @@ class Decoder(nn.Module):
 
 class AccessibilityModel(BaseModel):
 
-    def __init__(self, peaks, num_modules = 15, initial_counts = 15, 
-        dropout = 0.2, hidden = 128, use_cuda = True, highly_variable = None):
+    def __init__(self, peaks, num_modules = 15, initial_counts = 15, num_layers = 3,
+        encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, use_cuda = True, highly_variable = None,
+        seed = None):
 
         assert(isinstance(peaks, (list, np.ndarray)))
         if isinstance(peaks, list):
             peaks = np.array(peaks)
         assert(len(peaks.shape) == 2)
         
-        self.num_features = len(peaks)
-        self.peaks = np.array(peaks)
-        self.num_exog_features = len(self.peaks)
+        self.num_features = len(peaks) 
+        self.num_exog_features = self.num_features
         self.highly_variable = highly_variable
-        super().__init__(self.num_features, 
-            DANEncoder(self.num_features, num_modules, hidden, dropout), 
-            Decoder(self.num_features, num_modules, dropout), 
-            num_topics = num_modules, initial_counts = initial_counts, 
-            hidden = hidden, dropout = dropout, use_cuda = use_cuda)
 
+        super().__init__(
+            DANEncoder(self.num_features, num_modules, hidden, encoder_dropout, num_layers), 
+            Decoder(self.num_features, num_modules, decoder_dropout), 
+            num_topics = num_modules, use_cuda = use_cuda, seed = seed)
+            
 
     def model(self, peak_idx, read_depth, onehot_obs = None):
 
         pyro.module("decoder", self.decoder)
+
+        _alpha, _beta = self._get_gamma_parameters(self.I, self.num_topics)
+        with pyro.plate("topics", self.num_topics):
+            initial_counts = pyro.sample("a", dist.Gamma(self._to_tensor(_alpha), self._to_tensor(_beta)))
+
+        theta_loc = self._get_prior_mu(initial_counts, self.K)
+        theta_scale = self._get_prior_std(initial_counts, self.K)
         
         #pyro.module("decoder", self.decoder)
         with pyro.plate("cells", peak_idx.shape[0]):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
 
-            theta_loc = self.prior_mu * peak_idx.new_ones((peak_idx.shape[0], self.num_topics))
-            theta_scale = self.prior_std * peak_idx.new_ones((peak_idx.shape[0], self.num_topics))
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
             theta = theta/theta.sum(-1, keepdim = True)
@@ -105,15 +119,33 @@ class AccessibilityModel(BaseModel):
             # 𝑤𝑛|𝛽,𝜃 ~ Categorical(𝜎(𝛽𝜃))
             peak_probs = self.decoder(theta)
             
+            '''try:
+                pyro.sample(
+                    'obs',
+                    dist.Multinomial(total_count = read_depth if onehot_obs is None else 1, probs = peak_probs).to_event(1),
+                    obs=onehot_obs
+                )
+            except ValueError:
+                torch.save(peak_probs, 'data/mouse_prostate/peak_probs.pth')
+                raise ValueError()'''
+
             pyro.sample(
                 'obs',
-                dist.Multinomial(total_count = read_depth if onehot_obs is None else 1, probs = peak_probs).to_event(1),
-                obs=onehot_obs
+                BinaryMultinomial(total_count = read_depth if onehot_obs is None else 1, probs = peak_probs).to_event(1),
+                obs = peak_idx,
             )
 
     def guide(self, peak_idx, read_depth, onehot_obs = None):
 
         pyro.module("encoder", self.encoder)
+
+        _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
+        counts_mu = pyro.param('counts_mu', _counts_mu * read_depth.new_ones((self.num_topics,))).to(self.device)
+        counts_std = pyro.param('counts_std', np.sqrt(_counts_var) * read_depth.new_ones((self.num_topics,)), 
+                constraint = constraints.positive).to(self.device)
+
+        with pyro.plate("topics", self.num_topics) as k:
+            initial_counts = pyro.sample("a", dist.LogNormal(counts_mu[k], counts_std[k]))
 
         with pyro.plate("cells", peak_idx.shape[0]):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution,
@@ -167,7 +199,7 @@ class AccessibilityModel(BaseModel):
         return dense_matrix.astype(np.int64)
 
 
-    def _get_batches(self, accessibility_matrix, batch_size = 32, training = True):
+    def _get_batches(self, accessibility_matrix, batch_size = 32, bar = False, training = True):
 
         N = accessibility_matrix.shape[0]
 
@@ -175,9 +207,9 @@ class AccessibilityModel(BaseModel):
         assert(accessibility_matrix.shape[1] <= self.num_features)
 
         accessibility_matrix = accessibility_matrix.tocsr()
-        read_depth = torch.from_numpy(np.array(accessibility_matrix.sum(-1))).to(self.device)
+        read_depth = torch.from_numpy(np.array(accessibility_matrix.sum(-1))).to(self.device).type(torch.int32)
 
-        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = False):
+        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = bar):
 
             rd_batch = read_depth[batch_start:batch_end]
             idx_batch = torch.from_numpy(self._get_padded_idx_matrix(accessibility_matrix[batch_start : batch_end], rd_batch)).to(self.device)
@@ -186,9 +218,9 @@ class AccessibilityModel(BaseModel):
 
             yield idx_batch, read_depth[batch_start:batch_end], onehot_batch
 
-    def save(self, filename):
-        state_dict = dict(state = self.state_dict())
-        state_dict['peaks'] = self.peaks
+    def _get_save_data(self):
+
+        data = super()._get_save_data()
         
         try:
             self.factor_hits
@@ -202,26 +234,25 @@ class AccessibilityModel(BaseModel):
                 ids = self.factor_ids,
                 factor_names = self.factor_names,
             )
-            state_dict['motifs'] = motif_dictionary
+            data['motifs'] = motif_dictionary
 
-        torch.save(state_dict, filename)
+        return data
 
-    def load(self, filename):
-        state = torch.load(filename)
-        self.load_state_dict(state['state'])
-        self.eval()
-        self.peaks = state['peaks']
-        self.set_device('cpu')
+    def _load_save_data(self, data):
+        super()._load_save_data(data)
 
-        if 'motifs' in state:
-            self.factor_ids = state['motifs']['ids']
-            self.factor_names = state['motifs']['factor_names']
-            self.factor_hits = sparse.csr_matrix((state['motifs']['score'], state['motifs']['indices'], state['motifs']['indptr']), shape = (len(self.factor_ids), len(self.peaks)))
+        if 'motifs' in data:
+            self.factor_ids = data['motifs']['ids']
+            self.factor_names = data['motifs']['factor_names']
+            self.factor_hits = sparse.csr_matrix(
+                (data['motifs']['score'], data['motifs']['indices'], data['motifs']['indptr']), 
+                shape = (len(self.factor_ids), len(self.peaks))
+            )
 
 
     def _argsort_peaks(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
-        return np.argsort(self._get_beta()[module_num, :])
+        return np.argsort(self._score_feature()[module_num, :])
 
     def rank_peaks(self, module_num):
         return self.peaks[self._argsort_peaks(module_num)]

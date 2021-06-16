@@ -2,7 +2,7 @@
 
 from functools import partial
 
-from numpy.ma.core import minimum_fill_value
+from scipy import interpolate
 from kladi.matrix_models.estimator import ModuleEstimator
 import os
 import pyro
@@ -23,6 +23,10 @@ from math import ceil
 import time
 
 logger = logging.getLogger(__name__)
+
+
+class ModelParamError(ValueError):
+    pass
 
 class EarlyStopping:
 
@@ -55,8 +59,6 @@ class OneCycleLR_Wrapper(torch.optim.lr_scheduler.OneCycleLR):
         max_lr = kwargs.pop('max_lr')
         super().__init__(optimizer, max_lr, **kwargs)
 
-
-
 def encoder_layer(input_dim, output_dim, nonlin = True, dropout = 0.2):
     layers = [nn.Linear(input_dim, output_dim), nn.BatchNorm1d(output_dim)]
     if nonlin:
@@ -73,8 +75,9 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
 
 class BaseModel(nn.Module):
 
-    def __init__(self, num_features, encoder_model, decoder_model, num_topics=15, use_cuda = True,
-        seed = None):
+    I = 50
+
+    def __init__(self, encoder_model, decoder_model, num_topics=15, use_cuda = True, seed = None):
         super().__init__()
 
         self._set_seeds(seed)
@@ -82,9 +85,7 @@ class BaseModel(nn.Module):
 
         assert(isinstance(use_cuda, bool))
         assert(isinstance(num_topics, int) and num_topics > 0)
-        assert(isinstance(num_features, int) and num_features > 0)
 
-        self.num_features = num_features
         self.num_topics = num_topics
         self.decoder = decoder_model
         self.encoder = encoder_model
@@ -96,7 +97,6 @@ class BaseModel(nn.Module):
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.max_prob = torch.tensor([0.99999], requires_grad = False)
         self.K = torch.tensor(self.num_topics, requires_grad = False)
-        self.epsilon = torch.tensor(5e-4, requires_grad = False)
         self.set_device(self.device)
         self.training_bar = True
 
@@ -196,8 +196,6 @@ class BaseModel(nn.Module):
         self = self.to(self.device)
         self.max_prob = self.max_prob.to(self.device)
         self.K = self.K.to(self.device)
-        self.epsilon = self.epsilon.to(self.device)
-
 
     def _get_latent_MAP(self, *data):
         raise NotImplementedError()
@@ -270,32 +268,6 @@ class BaseModel(nn.Module):
         return np.array(learning_rates[:len(learning_rate_losses)]), np.array(learning_rate_losses)
 
 
-    @staticmethod
-    def _define_boundaries(learning_rate, loss):
-        
-        learning_rate = np.log(learning_rate)
-        bounds = learning_rate.min()-1, learning_rate.max()+1
-        
-        x = np.concatenate([[bounds[0]], learning_rate, [bounds[1]]])
-        y = np.concatenate([[loss.min()], loss, [loss.max()]])
-        spline_fit = interpolate.splrep(x, y, k = 5, s= 5)
-        
-        x_fit = np.linspace(*bounds, 100)
-        
-        first_div = interpolate.splev(x_fit, spline_fit, der = 1)
-        
-        cross_points = np.concatenate([[0], np.argwhere(np.abs(np.diff(np.sign(first_div))) > 0)[:,0], [len(first_div) - 1]])
-        longest_segment = np.argmax(np.diff(cross_points))
-        
-        left, right = cross_points[[longest_segment, longest_segment+1]]
-        
-        start, end = x_fit[[left, right]] + np.array([trim, -trim])
-        
-        optimal_lr = x_fit[left + first_div[left:right].argmin()]
-        
-        return np.exp(start), np.exp(end), np.exp(optimal_lr), spline_fit
-
-
     def _estimate_num_epochs(self,*, X, test_X, test_learning_rate, batch_size = 32, max_epochs = 200,
         tolerance = 1e-4, patience = 3):
 
@@ -354,7 +326,6 @@ class BaseModel(nn.Module):
                 'mode' : 'exp_range', 'gamma' : decay, 'cycle_momentum' : False,
             })
 
-
     @staticmethod
     def _warmup_lr_decay(step,*,n_batches_per_epoch, lr_decay):
         return min(1., step/n_batches_per_epoch)*(lr_decay**int(step/n_batches_per_epoch))
@@ -382,10 +353,9 @@ class BaseModel(nn.Module):
     def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, 
         test_X=None, patience = 3, tolerance = 1e-4):
 
-        max_convergence_iters = 5
         assert(isinstance(num_epochs, int) and num_epochs > 0)
         assert(isinstance(batch_size, int) and batch_size > 0)
-        assert(isinstance(min_learning_rate, float) and min_learning_rate > 0)
+        assert(isinstance(min_learning_rate, (int, float)) and min_learning_rate > 0)
         if max_learning_rate is None:
             max_learning_rate = min_learning_rate
         else:
@@ -413,7 +383,11 @@ class BaseModel(nn.Module):
                 self.train()
                 running_loss = 0.0
                 for batch in self._get_batches(X, batch_size = batch_size):
-                    running_loss += self.svi.step(*batch)
+                    try:
+                        running_loss += self.svi.step(*batch)
+                    except ValueError:
+                        raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
+
                     if epoch < num_epochs:
                         scheduler.step()
                 
@@ -542,9 +516,11 @@ class BaseModel(nn.Module):
     def _to_tensor(self, val):
         return torch.tensor(val).to(self.device)
 
-    def save(self, filename):
-        torch.save(self.state_dict(), filename)
+    def _get_save_data(self):
+        return dict(weights = self.state_dict())
 
-    def load(self, filename):
-        self.load_state_dict(torch.load(filename))
+    def _load_save_data(self, data):
+        self.load_state_dict(data['weights'])
         self.eval()
+        self.to_cpu()
+        return self

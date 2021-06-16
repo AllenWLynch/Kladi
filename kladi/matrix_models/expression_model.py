@@ -126,9 +126,7 @@ class ExpressionModel(BaseModel):
     '''
     Class
     '''
-
-    I = 50
-
+    
     def __init__(self, genes, highly_variable = None, num_modules = 15, decoder_dropout = 0.2, 
         encoder_dropout = 0.15, hidden = 128, use_cuda = True, num_layers = 3, seed = None):
         '''
@@ -160,6 +158,7 @@ class ExpressionModel(BaseModel):
         '''
 
         assert(isinstance(genes, (list, np.ndarray)))
+
         self.genes = np.ravel(np.array(genes))
         self.num_genes = len(self.genes)
         self.num_exog_features = len(self.genes)
@@ -176,7 +175,7 @@ class ExpressionModel(BaseModel):
 
         self.num_features = int(highly_variable.sum())
         
-        super().__init__(self.num_features, 
+        super().__init__( 
             ExpressionEncoder(self.num_features, num_modules, hidden, encoder_dropout, num_layers), 
             ExpressionDecoder(self.num_genes, num_modules, decoder_dropout), 
             num_topics = num_modules, use_cuda = use_cuda, seed = seed)
@@ -200,8 +199,6 @@ class ExpressionModel(BaseModel):
         with pyro.plate("cells", encoded_expr.shape[0]):
 
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
-            #theta_loc = self.prior_mu * encoded_expr.new_ones((encoded_expr.shape[0], self.num_topics))
-            #theta_scale = self.prior_std * encoded_expr.new_ones((encoded_expr.shape[0], self.num_topics))
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
             theta = theta/theta.sum(-1, keepdim = True)
@@ -325,49 +322,19 @@ class ExpressionModel(BaseModel):
 
         return self.decoder(latent_compositions)[0].cpu().detach().numpy()
 
-    def save(self, filename):
-        '''
-        Saves model weights to disk.
+    def _get_save_data(self):
+        return dict(
+            pi = self.deviance_model.pi_j_hat,
+            **super()._get_save_data()
+        )
 
-        Args:
-            filename (str): path to disk save location
-        
-        Returns:
-            self
-        '''
-        
-        state_dict = dict(state = self.state_dict())
-        try:
-            state_dict['deviance_pi'] = self.deviance_model.pi_j_hat
-        except AttributeError:
-            raise Exception('Cannot save model before it is trained.')
-
-        state_dict['genes'] = self.genes
-        torch.save(state_dict, filename)
-        return self
-
-    def load(self, filename):
-        '''
-        Loads model weights from disk. ExpressionModel must be instantiated using same constructor, then weights can be loaded from a previous ``save``.
-
-        expr_model = ExpressionModel(genes).load(path_to_disk)
-
-        Args:
-            filename (str): path to disk save location
-
-        Returns:
-            self
-        '''
-
-        state = torch.load(filename)
-        self.load_state_dict(state['state'])
-        self.eval()       
+    def _load_save_data(self, data):
+        super()._load_save_data(data)
 
         self.deviance_model = GeneDevianceModel(self.highly_variable)
-        self.deviance_model.set_pi(state['deviance_pi'])
-        self.set_device('cpu')
+        self.deviance_model.set_pi(data['pi'])
+
         return self
-        #self.genes = state['genes']
 
 
     def _featurize(self, count_matrix):

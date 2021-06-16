@@ -1,138 +1,108 @@
-
-import logging
-from numpy.core.defchararray import isnumeric
-from pyro.primitives import module, param
-from sklearn.model_selection import KFold
 import numpy as np
-from hyperopt import fmin, tpe, hp
+from sklearn.model_selection import KFold
+from sklearn.linear_model import LinearRegression
+from scipy import stats
+import logging
+import optuna
+from sklearn.utils.estimator_checks import parametrize_with_checks
+    
 
-logger = logging.getLogger(__name__)
+class ModuleObjective:
 
-class Objective:
+    def __init__(self, estimator, X, cv = 5, 
+        min_modules = 5, max_modules = 55, 
+        min_epochs = 15, max_epochs = 50, 
+        min_dropout = 0.01, max_dropout = 0.3,
+        batch_sizes = [32,64,128], seed = 2556):
 
-    types = dict(
-        num_modules  = int,
-        max_learning_rate = float,
-        num_epochs = int,
-        batch_size = int,
-        num_layers = int,
-        encoder_dropout = float,
-        epochs_adj_range = int, 
-        max_lr_scale = float,
-        seed = int,
-    )
+        self.params = []
+        self.trial_scores = []
+        self.fold_scores = []
+        self.was_pruned = []
 
-    def __init__(self, estimator, X, cv = 5):
-
-        self.estimator = estimator
-        self.results = []
-        self.best_score = np.inf
         if isinstance(cv, int):
-            self.cv = KFold(cv)
+            self.cv = KFold(cv, random_state = seed, shuffle= True)
         else:
             self.cv = cv
+        self.estimator = estimator
         self.X = X
 
-    def _map_types(self, params):
-        return {param : self.types[param](value) for param, value in params.items()}
+        self.min_modules = min_modules
+        self.max_modules = max_modules
+        self.min_epochs = min_epochs
+        self.max_epochs = max_epochs
+        self.min_dropout = min_dropout
+        self.max_dropout = max_dropout
+        self.batch_sizes = batch_sizes
+
+    def impute_performance(self, scores):
+
+        num_folds = len(scores)
+
+        features = np.array([
+            scores[:num_folds] for pruned, scores in zip(self.was_pruned, self.fold_scores) if (not pruned and len(scores) >= num_folds)
+        ]).reshape((-1,num_folds))
+
+        labels = np.array(self.trial_scores)[~np.array(self.was_pruned)]
+
+        impute_scores = np.array(scores)[np.newaxis, :]
+
+        reg = LinearRegression().fit(features, labels)
+        
+        return max(reg.predict(impute_scores)[0], np.median(self.trial_scores))
 
 
-    def __call__(self, params):
+    def __call__(self, trial):
 
-        params = self._map_types(params)
-
-        #check previous attempts
-        for run in self.results:
-            if run['params'] == params:
-                logging.info('Already tried this parameter. Skipping to next test.')
-                return run['mean_score']
-
-        logger.info('Proposed params: ' + str(params))
+        params = dict(
+            num_modules = trial.suggest_int('num_modules', self.min_modules, self.max_modules, log=True),
+            batch_size = trial.suggest_categorical('batch_size', self.batch_sizes),
+            encoder_dropout = trial.suggest_float('encoder_dropout', self.min_dropout, self.max_dropout),
+            num_epochs = trial.suggest_int('num_epochs', self.min_epochs, self.max_epochs, log = True),
+            seed = np.random.randint(0, 2**32 - 1),
+        )
+        
         self.estimator.set_params(**params)
 
-        scores = []
-        for train_idx, test_idx in self.cv.split(self.X):
-            train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
+        cv_scores = []
+        was_pruned = False
+        for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X)):
 
-            try:
-                self.estimator.fit(train_counts)
-                scores.append(self.estimator.score(test_counts))
-            except Exception as err:
-                logger.error('Exception occured while training: ' + repr(err))
-                scores.append(np.nan)
+            train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
+            
+            cv_scores.append(
+                self.estimator.fit(train_counts).score(test_counts)
+            )
+            trial.report(np.mean(cv_scores), step)
+                
+            if trial.should_prune():
+                logging.info('Trial pruned!')
+                was_pruned = True
+                break
         
-        mean_score = np.nanmean(scores)
-        is_best = mean_score < self.best_score
-        self.best_score = min(mean_score, self.best_score)
-        logger.info('Scores: mean = {:.3e}'.format(mean_score) + ('*' if is_best else '') + ', trials = ' +\
-            ', '.join(['{:.3e}'.format(score) for score in scores if np.isfinite(score)])
+        trial_score = self.impute_performance(cv_scores) if was_pruned else np.mean(cv_scores)
+        self.was_pruned.append(was_pruned)
+        self.fold_scores.append(cv_scores)
+        self.trial_scores.append(trial_score)
+        self.params.append(params)
+        return trial_score
+
+    def get_flat_results(self):
+        
+        if len(self.params) == 0:
+            raise Exception('No trials have been attempted!')
+
+        list_of_params = {param : [] for param in self.params[0].keys()}
+
+        for trial in self.params:
+            for param, value in trial.items():
+                list_of_params[param].append(value)
+
+        list_of_params = list_of_params.update(
+            value = self.trial_scores,  
+            was_pruned = self.was_pruned,
+            fold_scores = np.array(self.fold_scores, dtype = object)
         )
 
-        self.results.append(dict(
-            params = params,
-            scores = scores,
-            mean_score = mean_score,
-        ))
-
-        return mean_score 
-
-def minimize_objective(objective, space, max_evals, **kwargs):
-
-    try:
-        logger.info('Searching parameter space. Halt search with esc-I-I in jupyter or ctrl-c on terminal.')
-        best = fmin(objective, space, algo=tpe.suggest, max_evals=100, verbose = False, **kwargs)
-    except KeyboardInterrupt:
-        logger.warn('Interruped parameter search.')
-        best = objective.results[np.argmin([r['mean_score'] for r in objective.results])]['params']
-
-    return best, objective.results
-
-
-def nestle_model(estimator, X, cv = 5, max_evals = 100,
-        module_adj_range = (-2, 2),
-        batch_sizes = [32, 64, 128, 256],
-        encoder_dropout = (0.01, 0.1),
-        epochs_adj_range = [-10,10],
-        **kwargs
-    ):
-        
-    space = {
-        'num_modules' : hp.uniform('num_modules', estimator.num_modules + module_adj_range[0], estimator.num_modules + module_adj_range[1]),
-        'batch_size' : hp.choice('batch_size', batch_sizes),
-        'seed' : hp.randint('seed', 2**32 - 1),
-        'encoder_dropout' : hp.loguniform('encoder_dropout', np.log(encoder_dropout[0]), np.log(encoder_dropout[1])),
-        'num_epochs' : hp.uniform('num_epochs', estimator.num_epochs + epochs_adj_range[0], estimator.num_epochs + epochs_adj_range[1]),
-    }
-
-    return minimize_objective(Objective(estimator, X, cv = cv), space, max_evals= max_evals, **kwargs)
-    
-
-
-
-def estimate_num_modules(estimator, X, module_range = (5, 55), cv = 5, max_evals = None, grid_evaluations = 8, 
-    points_to_evaluate = None, **kwargs):
-    
-    space = {
-        'num_modules' : hp.qloguniform('num_modules', np.log(module_range[0]), np.log(module_range[1]), 1),
-    }
-
-    if max_evals is None:
-        max_evals = int(module_range[1] - module_range[0])
-
-    if points_to_evaluate is None:
-        points_to_evaluate = [
-            {'num_modules' : int(i)} for i in 
-            np.exp(np.linspace(np.log(module_range[0]), np.log(module_range[1]), grid_evaluations)) 
-        ]
-
-
-    return minimize_objective(Objective(estimator, X, cv = cv), space, max_evals= max_evals, 
-        points_to_evaluate = points_to_evaluate, **kwargs)
-
-    
-
-
-
-
-
+        return list_of_params
 
