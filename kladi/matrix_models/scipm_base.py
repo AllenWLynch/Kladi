@@ -1,10 +1,6 @@
 
 
 from functools import partial
-
-from scipy import interpolate
-from kladi.matrix_models.estimator import ModuleEstimator
-import os
 import pyro
 import pyro.distributions as dist
 import torch
@@ -18,7 +14,6 @@ import numpy as np
 import torch.distributions.constraints as constraints
 import logging
 from kladi.matrix_models.ilr import ilr
-import configparser
 from math import ceil
 import time
 
@@ -77,22 +72,47 @@ class BaseModel(nn.Module):
 
     I = 50
 
-    def __init__(self, encoder_model, decoder_model, num_topics=15, use_cuda = True, seed = None):
+    def __init__(self, encoder_model, decoder_model,*,
+            num_modules,
+            num_exog_features,
+            highly_variable,
+            hidden,
+            num_layers,
+            decoder_dropout,
+            encoder_dropout,
+            use_cuda,
+            seed, **encoder_kwargs):
         super().__init__()
 
         self._set_seeds(seed)
         pyro.clear_param_store()
+        torch.cuda.empty_cache()
 
         assert(isinstance(use_cuda, bool))
-        assert(isinstance(num_topics, int) and num_topics > 0)
+        assert(isinstance(num_modules, int) and num_modules > 0)
 
-        self.num_topics = num_topics
-        self.decoder = decoder_model
-        self.encoder = encoder_model
+        self.num_topics = num_modules
+
+        if highly_variable is None:
+            highly_variable = np.ones(num_exog_features).astype(bool)
+        else:
+            assert(isinstance(highly_variable, np.ndarray))
+            assert(highly_variable.dtype == bool)
+            
+            highly_variable = np.ravel(highly_variable)
+            assert(len(highly_variable) == num_exog_features)
+
+        self.highly_variable = highly_variable
+        self.num_endog_features = int(highly_variable.sum())
+        self.num_exog_features = num_exog_features
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
         if not use_cuda:
             logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
+
+        self.decoder = decoder_model(self.num_exog_features, num_modules, decoder_dropout)
+        self.encoder = encoder_model(self.num_endog_features, num_modules, 
+            hidden, encoder_dropout, num_layers, **encoder_kwargs)
             
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.max_prob = torch.tensor([0.99999], requires_grad = False)
@@ -157,13 +177,16 @@ class BaseModel(nn.Module):
         batch_loss = []
         for batch in self._get_batches(X, batch_size = batch_size, bar = False):
 
-            loss = self.svi.evaluate_loss(*batch)
+            loss = float(self.svi.evaluate_loss(*batch))
             batch_loss.append(loss)
 
         return np.array(batch_loss).sum() #loss is negative log-likelihood
 
     def _score_features(self):
         return np.sign(self._get_gamma()) * self._get_beta()
+
+    def get_topics(self):
+        return self._score_features()
     
     def _get_beta(self):
         # beta matrix elements are the weights of the FC layer on the decoder
@@ -208,7 +231,7 @@ class BaseModel(nn.Module):
         self.eval()
         logger.debug('Predicting latent variables ...')
         latent_vars = []
-        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, training = False)):
+        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, bar = True, training = False)):
             latent_vars.append(self._get_latent_MAP(*batch))
 
         theta = np.vstack(latent_vars)
@@ -380,11 +403,17 @@ class BaseModel(nn.Module):
 
             while True:
                 #train step
+
+                try:
+                    next(_t)
+                except StopIteration:
+                    pass
+                    
                 self.train()
                 running_loss = 0.0
                 for batch in self._get_batches(X, batch_size = batch_size):
                     try:
-                        running_loss += self.svi.step(*batch)
+                        running_loss += float(self.svi.step(*batch))
                     except ValueError:
                         raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
 
@@ -407,10 +436,6 @@ class BaseModel(nn.Module):
                     ))
 
                 epoch+=1
-                try:
-                    next(_t)
-                except StopIteration:
-                    pass
 
                 if early_stopper.should_stop_training(recent_losses[-1]) and epoch > num_epochs:
                     break

@@ -120,7 +120,6 @@ class ExpressionDecoder(nn.Module):
         # the output is σ(βθ)
         return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
 
-#DEFAULTS = {param : float(config.get('ExpressionModel', param)) for param in ['learning_rate','lr_decay','tolerance','patience']}
 
 class ExpressionModel(BaseModel):
     '''
@@ -128,7 +127,7 @@ class ExpressionModel(BaseModel):
     '''
     
     def __init__(self, genes, highly_variable = None, num_modules = 15, decoder_dropout = 0.2, 
-        encoder_dropout = 0.15, hidden = 128, use_cuda = True, num_layers = 3, seed = None):
+        encoder_dropout = 0.1, hidden = 128, use_cuda = True, num_layers = 3, seed = None):
         '''
         Initialize ExpressionModel instance. 
 
@@ -138,7 +137,7 @@ class ExpressionModel(BaseModel):
             ['GATA3', 'WNT3', 'CDK8']
 
             >> highly_variable[:3]
-            [True, False, False]
+            np.array([True, False, False], dtype = bool)
 
             >> expr_model = ExpressionModel(genes, highly_variable = highly_variable, num_modules = 10)
 
@@ -158,27 +157,21 @@ class ExpressionModel(BaseModel):
         '''
 
         assert(isinstance(genes, (list, np.ndarray)))
-
         self.genes = np.ravel(np.array(genes))
-        self.num_genes = len(self.genes)
-        self.num_exog_features = len(self.genes)
-
-        if highly_variable is None:
-            highly_variable = np.ones_like(genes).astype(bool)
-        else:
-            assert(isinstance(highly_variable, np.ndarray))
-            assert(highly_variable.dtype == bool)
-            
-            highly_variable = np.ravel(highly_variable)
-            assert(len(highly_variable) == self.num_genes)
-        self.highly_variable = highly_variable
-
-        self.num_features = int(highly_variable.sum())
         
-        super().__init__( 
-            ExpressionEncoder(self.num_features, num_modules, hidden, encoder_dropout, num_layers), 
-            ExpressionDecoder(self.num_genes, num_modules, decoder_dropout), 
-            num_topics = num_modules, use_cuda = use_cuda, seed = seed)
+        kwargs = dict(
+            num_modules = num_modules,
+            num_exog_features = len(self.genes),
+            highly_variable = highly_variable,
+            hidden = hidden,
+            num_layers = num_layers,
+            decoder_dropout = decoder_dropout,
+            encoder_dropout = encoder_dropout,
+            use_cuda = use_cuda,
+            seed = seed,
+        )
+        
+        super().__init__(ExpressionEncoder, ExpressionDecoder, **kwargs)
 
     def model(self, raw_expr, encoded_expr, read_depth):
 

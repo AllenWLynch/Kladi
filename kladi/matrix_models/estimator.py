@@ -1,22 +1,25 @@
-from typing import final
 from sklearn.base import BaseEstimator
-from sklearn.utils.estimator_checks import check_estimator
-from kladi.matrix_models.model_selection import ModuleObjective
 import numpy as np
-from scipy import interpolate
+from scipy import interpolate, sparse
 import matplotlib.pyplot as plt
 from kladi.matrix_models.model_selection import ModuleObjective
 import optuna
 import torch
 import logging
+from kladi.matrix_models.expression_model import ExpressionModel
+from kladi.matrix_models.accessibility_model import AccessibilityModel
+from gensim.matutils import Sparse2Corpus
+from gensim.models.coherencemodel import CoherenceModel
+from gensim.corpora import Dictionary
 
+class ExpressionTrainer(BaseEstimator):
 
-class ModuleEstimator(BaseEstimator):
+    base_estimator = ExpressionModel
 
-    def __init__(self,*, base_estimator, features, highly_variable = None, 
-        num_modules = 15, encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, num_layers = 3, 
+    def __init__(self,*, features, highly_variable = None, 
+        num_modules = 15, encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, num_layers = 3,
         min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32, patience = 3, tolerance = 1e-4,
-        policy = '1cycleLR', use_cuda = True, epochs_per_cycle = None, triangle_decay = None, seed = None): 
+         use_cuda = True, seed = None): 
 
         self.features = features
         self.num_modules = num_modules
@@ -29,14 +32,13 @@ class ModuleEstimator(BaseEstimator):
         self.batch_size = batch_size
         self.min_learning_rate = min_learning_rate
         self.max_learning_rate = max_learning_rate
-        self.epochs_per_cycle = epochs_per_cycle
-        self.triangle_decay = triangle_decay
         self.tolerance = tolerance
-        self.base_estimator = base_estimator
         self.num_layers = num_layers
-        self.policy = policy
         self.patience = patience
         self.seed = seed
+
+    def _get_score_fn(self, X):
+        return None
 
     def _make_estimator(self):
         
@@ -167,7 +169,7 @@ class ModuleEstimator(BaseEstimator):
         min_epochs = 20, max_epochs = 40, study = None):
 
         self.objective = ModuleObjective(self, X, cv = cv, min_modules = min_modules, max_modules = max_modules,
-            min_epochs = min_epochs, max_epochs = max_epochs)
+            min_epochs = min_epochs, max_epochs = max_epochs, score_fn = self._get_score_fn(X))
 
         if study is None:
             self.study = optuna.create_study(
@@ -221,7 +223,10 @@ class ModuleEstimator(BaseEstimator):
         
         logging.info('Training model with all data.')
 
-        all_counts = np.vstack([X, test_X])
+        if isinstance(X, np.ndarray):
+            all_counts = np.vstack([X, test_X])
+        else:
+            all_counts = sparse.vstack([X, test_X])
 
         return self.fit(all_counts).estimator
 
@@ -238,4 +243,26 @@ class ModuleEstimator(BaseEstimator):
         save_dict = torch.load(filename)
         self.set_params(**save_dict['params'])
 
-        return self._make_estimator()._load_save_data(save_dict['model'])
+        self._make_estimator()._load_save_data(save_dict['model'])
+
+        return self.estimator
+
+
+class CoherenceEvaluator:
+
+    def __init__(self, estimator, X, topn = 1000):
+
+        self.corpus = Sparse2Corpus(X, documents_columns = False)
+        self.gensim_dict = Dictionary.from_corpus(self.corpus)
+        self.topn = topn
+
+    def __call__(self, estimator, X):
+
+        topics = list(map(lambda x : list(x)[::-1], np.argsort(estimator.estimator._score_features(), -1)[:, -self.topn:].astype(str)))
+
+        return -CoherenceModel(topics = topics, corpus= self.corpus, dictionary= self.gensim_dict, topn = self.topn, coherence='u_mass').get_coherence()
+
+
+class AccessibilityTrainer(ExpressionTrainer):
+
+    base_estimator = AccessibilityModel

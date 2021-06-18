@@ -13,7 +13,8 @@ class ModuleObjective:
         min_modules = 5, max_modules = 55, 
         min_epochs = 15, max_epochs = 50, 
         min_dropout = 0.01, max_dropout = 0.3,
-        batch_sizes = [32,64,128], seed = 2556):
+        batch_sizes = [32,64,128], seed = 2556, 
+        score_fn = None):
 
         self.params = []
         self.trial_scores = []
@@ -34,7 +35,9 @@ class ModuleObjective:
         self.min_dropout = min_dropout
         self.max_dropout = max_dropout
         self.batch_sizes = batch_sizes
+        self.score_fn = score_fn
 
+        
     def impute_performance(self, scores):
 
         num_folds = len(scores)
@@ -49,9 +52,9 @@ class ModuleObjective:
 
         reg = LinearRegression().fit(features, labels)
         
-        return max(reg.predict(impute_scores)[0], np.median(self.trial_scores))
+        return reg.predict(impute_scores)[0]
 
-
+    
     def __call__(self, trial):
 
         params = dict(
@@ -66,25 +69,34 @@ class ModuleObjective:
 
         cv_scores = []
         was_pruned = False
-        for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X)):
+        try:
+            for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X)):
 
-            train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
-            
-            cv_scores.append(
-                self.estimator.fit(train_counts).score(test_counts)
-            )
-            trial.report(np.mean(cv_scores), step)
+                train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
                 
-            if trial.should_prune():
-                logging.info('Trial pruned!')
-                was_pruned = True
-                break
-        
-        trial_score = self.impute_performance(cv_scores) if was_pruned else np.mean(cv_scores)
-        self.was_pruned.append(was_pruned)
-        self.fold_scores.append(cv_scores)
-        self.trial_scores.append(trial_score)
-        self.params.append(params)
+                self.estimator.fit(train_counts)
+                if self.score_fn is None:
+                    cv_scores.append(self.estimator.score(test_counts))
+                else:
+                    cv_scores.append(self.score_fn(self.estimator, test_counts))
+
+                trial.report(np.mean(cv_scores), step)
+                    
+                if trial.should_prune():
+                    logging.info('Trial pruned!')
+                    was_pruned = True
+                    break
+            
+            trial_score = self.impute_performance(cv_scores) if was_pruned else np.mean(cv_scores)
+            self.was_pruned.append(was_pruned)
+            self.fold_scores.append(cv_scores)
+            self.trial_scores.append(trial_score)
+            self.params.append(params)
+            
+        except RuntimeError:
+            raise optuna.exceptions.TrialPruned()
+
+
         return trial_score
 
     def get_flat_results(self):
@@ -98,11 +110,8 @@ class ModuleObjective:
             for param, value in trial.items():
                 list_of_params[param].append(value)
 
-        list_of_params = list_of_params.update(
-            value = self.trial_scores,  
-            was_pruned = self.was_pruned,
-            fold_scores = np.array(self.fold_scores, dtype = object)
-        )
+        list_of_params['value'] = self.trial_scores
+        list_of_params['was_pruned'] = self.was_pruned
+        list_of_params['fold_scores'] = np.array(self.fold_scores, dtype = object)
 
         return list_of_params
-
