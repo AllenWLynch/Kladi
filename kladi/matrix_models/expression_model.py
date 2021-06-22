@@ -177,7 +177,7 @@ class ExpressionModel(BaseModel):
 
         pyro.module("decoder", self.decoder)
 
-        self.dispersion = pyro.param("dispersion", torch.tensor(5.) * torch.ones(self.num_genes), 
+        self.dispersion = pyro.param("dispersion", torch.tensor(5.) * torch.ones(self.num_exog_features), 
             constraint = constraints.positive).to(self.device)
 
         _alpha, _beta = self._get_gamma_parameters(self.I, self.num_topics)
@@ -289,9 +289,9 @@ class ExpressionModel(BaseModel):
             X = np.array(X.todense())
 
         assert(len(X.shape) == 2)
-        assert(X.shape[1] == self.num_genes)
+        assert(X.shape[1] == self.num_exog_features)
         
-        assert(np.isclose(X.astype(np.int64), X).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
+        assert(np.isclose(X.astype(np.int64), X, 1e-3).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
         return X.astype(np.float32)
 

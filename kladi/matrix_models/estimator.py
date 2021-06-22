@@ -8,17 +8,39 @@ import torch
 import logging
 from kladi.matrix_models.expression_model import ExpressionModel
 from kladi.matrix_models.accessibility_model import AccessibilityModel
-from gensim.matutils import Sparse2Corpus
-from gensim.models.coherencemodel import CoherenceModel
-from gensim.corpora import Dictionary
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+try:
+    from IPython.display import clear_output
+    clear_output(wait=True)
+    NOTEBOOK_MODE = True
+except ImportError:
+    NOTEBOOK_MODE = False
 
 class ExpressionTrainer(BaseEstimator):
 
     base_estimator = ExpressionModel
+    patience = 3
+    tolerance = 1e-4
 
-    def __init__(self,*, features, highly_variable = None, 
+    @classmethod
+    def load(cls, filename):
+
+        save_dict = torch.load(filename)
+
+        est = cls()
+        est.set_params(**save_dict['params'])
+
+        model = est._make_estimator()
+        model._load_save_data(save_dict['model'])
+
+        return model
+
+
+    def __init__(self, features = None, highly_variable = None, 
         num_modules = 15, encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, num_layers = 3,
-        min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32, patience = 3, tolerance = 1e-4,
+        min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32,
          use_cuda = True, seed = None): 
 
         self.features = features
@@ -32,9 +54,7 @@ class ExpressionTrainer(BaseEstimator):
         self.batch_size = batch_size
         self.min_learning_rate = min_learning_rate
         self.max_learning_rate = max_learning_rate
-        self.tolerance = tolerance
         self.num_layers = num_layers
-        self.patience = patience
         self.seed = seed
 
     def _get_score_fn(self, X):
@@ -165,6 +185,57 @@ class ExpressionTrainer(BaseEstimator):
         self.set_params(num_epochs = self.num_epochs)
         return num_epochs, num_epochs*2
 
+    def _get_median_tuner(self):
+        return optuna.pruners.MedianPruner(n_startup_trials = 5, 
+                                                    n_warmup_steps = 0, interval_steps = 1, n_min_trials = 1)
+
+    @staticmethod
+    def _print_study(study, trial):
+
+        def get_trial_desc(trial):
+
+            if trial.user_attrs['completed']:
+                return 'Trial #{:<3} | completed, score: {:.4e} | params: {}'.format(str(trial.number), trial.values[-1], str(trial.user_attrs['trial_params']))
+            else:
+                return 'Trial #{:<3} | pruned at step: {:<12} | params: {}'.format(str(trial.number), str(trial.user_attrs['batches_trained']), str(trial.user_attrs['trial_params']))
+
+        if NOTEBOOK_MODE:
+            clear_output(wait=True)
+        else:
+            print('------------------------------------------------------')
+
+        try:
+            print('Trials finished: {} | Best trial: {} | Best score: {:.4e}'.format(
+            str(len(study.trials)),
+            str(study.best_trial.number),
+            study.best_value
+        ), end = '\n\n')
+        except ValueError:
+            print('Trials finished {}'.format(str(len(study.trials))), end = '\n\n')        
+
+        print('Modules | Trials (number is #folds tested)', end = '')
+
+        study_results = sorted([
+            (trial_.user_attrs['trial_params']['num_modules'], trial_.user_attrs['batches_trained'], trial_.number)
+            for trial_ in study.trials
+        ], key = lambda x : x[0])
+
+        current_num_modules = 0
+        for trial_result in study_results:
+
+            if trial_result[0] > current_num_modules:
+                current_num_modules = trial_result[0]
+                print('\n{:>7} | '.format(str(current_num_modules)), end = '')
+
+            print(str(trial_result[1]), end = ' ')
+            #print(trial_result[1], ('*' trial_result[2] == study.best_trial.number else ''), end = '')
+        
+        print('', end = '\n\n')
+        print('Trial Information:')
+        for trial in study.trials:
+            print(get_trial_desc(trial))
+
+
     def tune_hyperparameters(self, X, iters = 200, cv = 5, min_modules = 5, max_modules = 55, 
         min_epochs = 20, max_epochs = 40, study = None):
 
@@ -174,12 +245,11 @@ class ExpressionTrainer(BaseEstimator):
         if study is None:
             self.study = optuna.create_study(
                 direction = 'minimize',
-                pruner = optuna.pruners.MedianPruner(n_startup_trials = 5, 
-                                                    n_warmup_steps = 0, interval_steps = 1, n_min_trials = 1)
+                pruner = optuna.pruners.SuccessiveHalvingPruner(min_resource=1.0, bootstrap_count=0, reduction_factor=3),
             )
         
         try:
-            self.study.optimize(self.objective, n_trials = iters)
+            self.study.optimize(self.objective, n_trials = iters, callbacks = [self._print_study], catch = (RuntimeError,),)
         except KeyboardInterrupt:
             pass
         
@@ -192,20 +262,34 @@ class ExpressionTrainer(BaseEstimator):
         except AttributeError:
             raise Exception('User must run "tune_hyperparameters" before running this function')
 
-        return self.objective.get_flat_results()
+        return self.study.trials
 
 
-    def get_best_params(self, top_n_models = 5):
+    def get_best_trials(self, top_n_models = 5):
         
         assert(isinstance(top_n_models, int) and top_n_models > 0)
         try:
             self.objective
         except AttributeError:
             raise Exception('User must run "tune_hyperparameters" before running this function')
+        
+        def score_trial(trial):
+            if trial.user_attrs['completed']:
+                try:
+                    return trial.values[-1]
+                except (TypeError, AttributeError):
+                    pass
 
-        model_idx = np.argsort(self.objective.trial_scores)[:top_n_models]
+            return np.inf
 
-        return [self.objective.params[i] for i in model_idx]
+        sorted_trials = sorted(self.study.trials, key = score_trial)
+
+        return sorted_trials[:top_n_models]
+
+
+    def get_best_params(self, top_n_models = 5):
+
+        return [trial.user_attrs['trial_params'] for trial in self.get_best_trials(top_n_models)]
 
 
     def select_best_model(self, X, test_X, top_n_models = 5):
@@ -214,8 +298,12 @@ class ExpressionTrainer(BaseEstimator):
         best_params = self.get_best_params(top_n_models)
         for params in best_params:
             logging.info('Training model with parameters: ' + str(params))
-            scores.append(self.set_params(**params).fit(X).score(test_X))
-            logging.info('Score: {:.5e}'.format(scores[-1]))
+            try:
+                scores.append(self.set_params(**params).fit(X).score(test_X))
+                logging.info('Score: {:.5e}'.format(scores[-1]))
+            except RuntimeError as err:
+                logging.error('Error occured while training, skipping model.')
+                scores.append(np.inf)
 
         final_choice = best_params[np.argmin(scores)]
         logging.info('Set parameters to best combination: ' + str(final_choice))
@@ -238,17 +326,8 @@ class ExpressionTrainer(BaseEstimator):
         save_dict = dict(params = self.get_params(), model = self.estimator._get_save_data())
         torch.save(save_dict, filename)
 
-    def load(self, filename):
 
-        save_dict = torch.load(filename)
-        self.set_params(**save_dict['params'])
-
-        self._make_estimator()._load_save_data(save_dict['model'])
-
-        return self.estimator
-
-
-class CoherenceEvaluator:
+'''class CoherenceEvaluator:
 
     def __init__(self, estimator, X, topn = 1000):
 
@@ -260,9 +339,10 @@ class CoherenceEvaluator:
 
         topics = list(map(lambda x : list(x)[::-1], np.argsort(estimator.estimator._score_features(), -1)[:, -self.topn:].astype(str)))
 
-        return -CoherenceModel(topics = topics, corpus= self.corpus, dictionary= self.gensim_dict, topn = self.topn, coherence='u_mass').get_coherence()
+        return -CoherenceModel(topics = topics, corpus= self.corpus, dictionary= self.gensim_dict, topn = self.topn, coherence='u_mass').get_coherence()'''
 
 
 class AccessibilityTrainer(ExpressionTrainer):
 
     base_estimator = AccessibilityModel
+    tolerance = 1e-5

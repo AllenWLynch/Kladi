@@ -183,7 +183,7 @@ class BaseModel(nn.Module):
         return np.array(batch_loss).sum() #loss is negative log-likelihood
 
     def _score_features(self):
-        return np.sign(self._get_gamma()) * self._get_beta()
+        return np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var())
 
     def get_topics(self):
         return self._score_features()
@@ -275,18 +275,22 @@ class BaseModel(nn.Module):
         batches_complete, steps_complete, step_loss = 0,0,0
         learning_rate_losses = []
         
-        for epoch in range(num_epochs):
-            #train step
-            self.train()
-            for batch in self._get_batches(X, batch_size = batch_size):
-                step_loss += self.svi.step(*batch)
-                batches_complete+=1
-                
-                if batches_complete % eval_every == 0 and batches_complete > 0:
-                    steps_complete+=1
-                    scheduler.step()
-                    learning_rate_losses.append(step_loss/(eval_every * batch_size * self.num_exog_features))
-                    step_loss = 0.0
+        try:
+            for epoch in range(num_epochs):
+                #train step
+                self.train()
+                for batch in self._get_batches(X, batch_size = batch_size):
+                    step_loss += float(self.svi.step(*batch))
+                    batches_complete+=1
+                    
+                    if batches_complete % eval_every == 0 and batches_complete > 0:
+                        steps_complete+=1
+                        scheduler.step()
+                        learning_rate_losses.append(step_loss/(eval_every * batch_size * self.num_exog_features))
+                        step_loss = 0.0
+
+        except ValueError:
+            pass
                     
         return np.array(learning_rates[:len(learning_rate_losses)]), np.array(learning_rate_losses)
 

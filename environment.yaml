@@ -20,3 +20,4 @@ dependencies:
   - numpy>=1.19.0,<2
   - scipy>=1.5,<2
   - umap-learn>=0.5,<1
+  - optuna>=2.8,<3

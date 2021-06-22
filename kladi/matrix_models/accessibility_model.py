@@ -20,10 +20,6 @@ import logging
 from lisa import FromRegions
 import re
 
-from gensim.matutils import Sparse2Corpus
-from gensim.models.coherencemodel import CoherenceModel
-from gensim.corpora import Dictionary
-
 
 class ZeroPaddedBinaryMultinomial(pyro.distributions.Multinomial):
     
