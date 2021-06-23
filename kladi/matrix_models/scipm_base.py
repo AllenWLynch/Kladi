@@ -6,7 +6,7 @@ import pyro.distributions as dist
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from pyro.infer import SVI, TraceMeanField_ELBO
 from tqdm import tqdm, trange
 from pyro.nn import PyroModule
@@ -183,7 +183,8 @@ class BaseModel(nn.Module):
         return np.array(batch_loss).sum() #loss is negative log-likelihood
 
     def _score_features(self):
-        return np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var())
+        score = np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var())
+        return score
 
     def get_topics(self):
         return self._score_features()
@@ -257,7 +258,7 @@ class BaseModel(nn.Module):
         pyro.set_rng_seed(seed)
         np.random.seed(seed)
 
-    def _get_learning_rate_bounds(self, X, num_epochs = 3, eval_every = 10, 
+    def _get_learning_rate_bounds(self, X, num_epochs = 6, eval_every = 10, 
         min_learning_rate = 1e-6, max_learning_rate = 1, batch_size = 32):
     
         X = self._validate_data(X)

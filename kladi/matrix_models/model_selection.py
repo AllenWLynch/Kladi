@@ -49,6 +49,7 @@ class ModuleObjective:
             num_epochs = trial.suggest_int('num_epochs', self.min_epochs, self.max_epochs, log = True),
             seed = np.random.randint(0, 2**32 - 1),
         )
+
         
         self.estimator.set_params(**params)
 

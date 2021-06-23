@@ -77,7 +77,7 @@ class GeneDevianceModel:
                 )
             )
 
-        return np.nan_to_num(r_ij)
+        return np.clip(np.nan_to_num(r_ij), -10, 10)
 
 
 class ExpressionEncoder(nn.Module):
@@ -97,10 +97,10 @@ class ExpressionEncoder(nn.Module):
         X = self.fc_layers(X)
 
         theta_loc = X[:, :self.num_topics]
-        theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])
+        theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])# + 1e-5
 
         rd_loc = X[:,-2].reshape((-1,1))
-        rd_scale = F.softplus(X[:,-1]).reshape((-1,1))
+        rd_scale = F.softplus(X[:,-1]).reshape((-1,1))# + 1e-5
 
         return theta_loc, theta_scale, rd_loc, rd_scale
 
@@ -194,6 +194,7 @@ class ExpressionModel(BaseModel):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+            
             theta = theta/theta.sum(-1, keepdim = True)
 
             read_scale = pyro.sample(
@@ -208,9 +209,11 @@ class ExpressionModel(BaseModel):
             mu = torch.multiply(read_scale, expr_rate)
 
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
+
             pyro.sample('obs', 
                         dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
                         obs= raw_expr)
+
             '''log_p_success = (mu + self.epsilon).log() - (mu + self.dispersion + self.epsilon).log()
             logodds_p = log_p_success - (1 - torch.exp(log_p_success)).log()
             pyro.sample('obs', 
@@ -230,16 +233,20 @@ class ExpressionModel(BaseModel):
         with pyro.plate("topics", self.num_topics) as k:
             initial_counts = pyro.sample("a", dist.LogNormal(counts_mu[k], counts_std[k]))
 
+        
         with pyro.plate("cells", encoded_expr.shape[0]):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution,
             # where μ and Σ are the encoder network outputs
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
-
+            
             theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
+            )
 
             read_depth = pyro.sample(
-                "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1))
+                "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
+            )
+
 
     def _get_expression_distribution_parameters(self, raw_expr, batch_size = 32):
 
@@ -353,7 +360,7 @@ class ExpressionModel(BaseModel):
 
         return self.genes[np.argsort(self._score_features()[module_num, :])]
 
-    def get_top_genes(self, module_num, top_n = 200):
+    def get_top_genes(self, module_num, top_n = None):
         '''
         For a module, return the top n genes that are most activated.
 
@@ -364,7 +371,14 @@ class ExpressionModel(BaseModel):
         Returns
             (np.ndarray): Names of top n genes, sorted from least to most activated
         '''
-        return self.rank_genes(module_num)[-top_n : ]
+
+        if top_n is None:
+            top_genes_mask = self._score_features()[module_num,:] > 2
+            return self.genes[top_genes_mask]
+
+        else:
+            assert(isinstance(top_n, int) and top_n > 0)
+            return self.rank_genes(module_num)[-top_n : ]
 
 
     def rank_modules(self, gene):
@@ -387,7 +401,7 @@ class ExpressionModel(BaseModel):
         return list(sorted(zip(range(self.num_topics), self._score_features()[:, gene_idx]), key = lambda x : x[1]))
     
 
-    def post_genelist(self, module_num, top_n_genes = 200):
+    def post_genelist(self, module_num, top_n = None):
         '''
         Post genelist to Enrichr, recieve genelist ID for later retreival.
 
@@ -399,7 +413,7 @@ class ExpressionModel(BaseModel):
             enrichr_id (str): unique ID of genelist for retreival with ``get_enrichments`` or ``get_ontology``
         '''
 
-        top_genes = '\n'.join(self.get_top_genes(module_num, top_n=top_n_genes))
+        top_genes = '\n'.join(self.get_top_genes(module_num, top_n=top_n))
 
         enrichr_url = config.get('Enrichr','url')
         post_endpoint = config.get('Enrichr','post')
@@ -524,7 +538,7 @@ class ExpressionModel(BaseModel):
 
         Example:
 
-            post_id = expr_model.post_genelist(0, top_n_genes = 250) #post top 250 module 0 genes
+            post_id = expr_model.post_genelist(0) #post top 250 module 0 genes
             enrichments = expr_model.get_enrichments(post_id)
             expr_model.plot_enrichments(enrichments)
 
