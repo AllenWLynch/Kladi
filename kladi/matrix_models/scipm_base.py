@@ -184,6 +184,7 @@ class BaseModel(nn.Module):
 
     def _score_features(self):
         score = np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var())
+        #score = np.sign(self._get_gamma()) * (self._get_beta())
         return score
 
     def get_topics(self):

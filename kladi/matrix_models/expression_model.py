@@ -112,13 +112,13 @@ class ExpressionDecoder(nn.Module):
         self.beta = nn.Linear(num_topics, num_genes, bias = False)
         self.bn = nn.BatchNorm1d(num_genes)
         self.drop = nn.Dropout(dropout)
-        self.fc = nn.Linear(num_topics, num_genes, bias = False)
-        self.bn2 = nn.BatchNorm1d(num_genes)
+        #self.fc = nn.Linear(num_topics, num_genes, bias = False)
+        #self.bn2 = nn.BatchNorm1d(num_genes)
 
     def forward(self, latent_composition):
         inputs = self.drop(latent_composition)
         # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1), self.bn2(self.fc(inputs))
+        return F.softmax(self.bn(self.beta(inputs)), dim=1) #, self.bn2(self.fc(inputs))
 
 
 class ExpressionModel(BaseModel):
@@ -204,17 +204,20 @@ class ExpressionModel(BaseModel):
             #read_scale = torch.minimum(read_scale, self.max_scale)
             # conditional distribution of 𝑤𝑛 is defined as
             # 𝑤𝑛|𝛽,𝜃 ~ Categorical(𝜎(𝛽𝜃))
-            expr_rate, dropout = self.decoder(theta)
+            #expr_rate, dropout = self.decoder(theta)
+            expr_rate = self.decoder(theta)
 
             mu = torch.multiply(read_scale, expr_rate)
 
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
 
-            pyro.sample('obs', 
+            pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = raw_expr)
+
+            '''pyro.sample('obs', 
                         dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
                         obs= raw_expr)
 
-            '''log_p_success = (mu + self.epsilon).log() - (mu + self.dispersion + self.epsilon).log()
+            log_p_success = (mu + self.epsilon).log() - (mu + self.dispersion + self.epsilon).log()
             logodds_p = log_p_success - (1 - torch.exp(log_p_success)).log()
             pyro.sample('obs', 
                             dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, logits = logodds_p, gate_logits=dropout).to_event(1),
@@ -238,7 +241,7 @@ class ExpressionModel(BaseModel):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution,
             # where μ and Σ are the encoder network outputs
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
-            
+
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
             )
@@ -320,7 +323,7 @@ class ExpressionModel(BaseModel):
 
         latent_compositions = self._to_tensor(latent_compositions)
 
-        return self.decoder(latent_compositions)[0].cpu().detach().numpy()
+        return self.decoder(latent_compositions).cpu().detach().numpy()
 
     def _get_save_data(self):
         return dict(

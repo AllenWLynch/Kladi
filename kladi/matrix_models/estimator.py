@@ -119,7 +119,7 @@ class ExpressionTrainer(BaseEstimator):
         return np.exp(start), np.exp(end), spline_fit
 
 
-    def tune_learning_rate_bounds(self, X, num_epochs = 3, eval_every = 20):
+    def tune_learning_rate_bounds(self, X, num_epochs = 5, eval_every = 10):
 
         self.gradient_lr, self.gradient_loss = self._make_estimator()._get_learning_rate_bounds(X, num_epochs = num_epochs, eval_every = eval_every,
             min_learning_rate = self.min_learning_rate, max_learning_rate = self.max_learning_rate)
