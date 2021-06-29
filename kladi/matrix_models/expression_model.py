@@ -224,14 +224,14 @@ class ExpressionModel(BaseModel):
                 "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1))
 
 
-    def _get_expression_distribution_parameters(self, raw_expr, batch_size = 32):
+    def _get_expression_distribution_parameters(self, X, batch_size = 32):
 
-        X = self._validate_data(raw_expr)
+        X = self._validate_data(X)
         assert(isinstance(batch_size, int) and batch_size > 0)
 
         read_depths = []
         for i,batch in enumerate(self._get_batches(X, batch_size = batch_size)):
-            raw_expr, encoded_expr, read_depth = batch
+            encoded_expr = batch[2]
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
 
             read_depths.append(np.exp(rd_loc.detach().cpu().numpy()))
@@ -241,8 +241,8 @@ class ExpressionModel(BaseModel):
         return read_depth
 
 
-    def _get_latent_MAP(self, raw_expr, encoded_expr, read_depth):
-        theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
+    def _get_latent_MAP(self, X):
+        theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(X[2])
 
         Z = theta_loc.cpu().detach().numpy()
         return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
@@ -265,7 +265,20 @@ class ExpressionModel(BaseModel):
                 covariates[batch_start : batch_end] if not covariates is None else []
             )
 
-    def _validate_data(self, X):
+    def _validate_nongenomic_features(self, X, desired_shape):
+
+        assert(isinstance(X, np.ndarray) or isspmatrix(X))
+        if isspmatrix(X):
+            X = np.array(X.todense())
+
+        if desired_shape[-1] == 0:
+            assert(X.shape == (1,0))
+        else:
+           assert(X.shape == desired_shape)
+
+        return X.astype(np.float32)
+
+    def _validate_counts(self, X):
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
         
         if isspmatrix(X):
@@ -277,6 +290,19 @@ class ExpressionModel(BaseModel):
         assert(np.isclose(X.astype(np.int64), X, 1e-3).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
         return X.astype(np.float32)
+
+    def _validate_data(self, X):
+        
+        if isinstance(X, (list, tuple)):
+            counts = X[0]
+
+        counts = self._validate_counts(counts)
+
+        return (
+            counts, 
+            self._validate_nongenomic_features(X[1], (len(counts), self.num_other_features)) if self.num_other_features > 0 else [],
+            self._validate_nongenomic_features(X[2], (len(counts), self.num_covariates) if self.num_covariates > 0 else [])
+        )
 
     def impute(self, latent_compositions):
         '''

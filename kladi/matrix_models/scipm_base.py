@@ -407,7 +407,7 @@ class BaseModel(nn.Module):
             assert(isinstance(max_learning_rate, float) and max_learning_rate > 0)
         
         X = self._validate_data(X)
-        n_observations = X.shape[0]
+        n_observations = X[0].shape[0]
         n_batches = self.get_num_batches(n_observations, batch_size)
 
         scheduler = self._get_1cycle_scheduler(min_learning_rate = min_learning_rate, max_learning_rate = max_learning_rate,
