@@ -105,6 +105,42 @@ def layout_labels(*, ax, x, y, label, label_closeness = 5, fontsize = 11, max_re
 
     return ax
 
+def plot_factor_influence(ax, l1_pvals, l2_pvals, factor_names, pval_threshold = (1e-5, 1e-5), 
+    hue = None, palette = 'coolwarm', legend_label = '', hue_order = None, show_legend = True,
+    label_closeness = 2, max_label_repeats = 1, axlabels = ('list1', 'list2'), color = 'grey', fontsize = 12, interactive = False):
+
+    if not hue is None:
+        assert(isinstance(hue, (list, np.ndarray)))
+        assert(len(hue) == len(factor_names))
+        
+        cell_colors = map_colors(ax, hue, palette, 
+            add_legend = show_legend, hue_order = hue_order, 
+            cbar_kwargs = dict(location = 'right', pad = 0.01, shrink = 0.5, aspect = 15, anchor = (1.05, 0.5), label = legend_label),
+            legend_kwargs = dict(loc="upper right", markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large',
+                        bbox_to_anchor=(1.05, 0.5), label = legend_label))
+    else:
+        cell_colors = color
+
+    l1_pvals = np.array(l1_pvals)
+    l2_pvals = np.array(l2_pvals)
+
+    name_mask = np.logical_or(l1_pvals < pval_threshold[0], l2_pvals < pval_threshold[1])
+
+    x = -np.log10(l1_pvals)
+    y = -np.log10(l2_pvals)
+    
+    if not interactive:
+        ax.scatter(x, y, c = cell_colors)
+        layout_labels(ax = ax, x = x[name_mask], y = y[name_mask], label_closeness = label_closeness, 
+            fontsize = fontsize, label = np.array(factor_names)[name_mask], max_repeats = max_label_repeats)
+
+        ax.set(xlabel = axlabels[0], ylabel = axlabels[1])
+        ax.spines["right"].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        return ax
+    else:
+        raise NotImplementedError()
+
 
 def plot_umap(X, hue, palette = 'viridis', projection = '2d', ax = None, figsize= (10,5),
         add_legend = True, hue_order = None, size = 2, title = None):

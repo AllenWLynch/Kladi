@@ -19,10 +19,6 @@ import time
 
 logger = logging.getLogger(__name__)
 
-
-class ModelParamError(ValueError):
-    pass
-
 class EarlyStopping:
 
     def __init__(self, 
@@ -47,6 +43,9 @@ class EarlyStopping:
                 self.wait += 1
 
         return False
+
+class ModelParamError(ValueError):
+    pass
 
 class OneCycleLR_Wrapper(torch.optim.lr_scheduler.OneCycleLR):
 
@@ -149,18 +148,17 @@ class BaseModel(nn.Module):
         return N//batch_size + int(N % batch_size > 0)
 
     @staticmethod
-    def _iterate_batch_idx(N, batch_size, bar = False):
+    def _iterate_batch_idx(N, batch_size, bar = False, desc = None):
 
         num_batches = N//batch_size + int(N % batch_size > 0)
-        for i in range(num_batches) if not bar else tqdm(range(num_batches)):
+        for i in range(num_batches) if not bar else tqdm(range(num_batches), desc = desc):
             yield i * batch_size, (i + 1) * batch_size
 
     @staticmethod
     def _clr(Z):
         return np.log(Z)/np.log(Z).mean(-1, keepdims = True)
 
-
-    def _get_batches(self, *args, batch_size = 32, bar = True):
+    def _get_batches(self, *args, batch_size = 32, bar = True, desc = None, **kwargs):
         raise NotImplementedError()
 
     def _check_latent_vars(self, latent_compositions):
@@ -233,7 +231,7 @@ class BaseModel(nn.Module):
         self.eval()
         logger.debug('Predicting latent variables ...')
         latent_vars = []
-        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, bar = True, training = False)):
+        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, bar = True, training = False, desc = 'Predicting latent vars')):
             latent_vars.append(self._get_latent_MAP(*batch))
 
         theta = np.vstack(latent_vars)

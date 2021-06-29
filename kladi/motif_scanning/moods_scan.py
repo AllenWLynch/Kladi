@@ -14,6 +14,8 @@ import logging
 from glob import glob
 import tqdm
 
+logger = logging.getLogger(__name__)
+
 config = configparser.ConfigParser()
 config.read('kladi/motif_scanning/config.ini')
 
@@ -58,7 +60,7 @@ def convert_jaspar_to_moods_pfm(jaspar_file):
         os.remove(jaspar_file)
 
         new_motif_filename = os.path.join(config.get('data','motifs'), '{}_{}.{}'.format(
-                motif_id, factor_name, config.get('jaspar','pfm_suffix')
+                motif_id, factor_name.replace('(','.').replace(')', ''), config.get('jaspar','pfm_suffix')
             ).replace('/', '-'))
         with open( new_motif_filename, 'w') as f:
             print(pfm_matrix, end = '', file = f)
@@ -87,19 +89,23 @@ def download_jaspar_motifs():
 
 def get_peak_sequences(peaks, genome, output_file):
 
-    logging.info('Getting peak sequences ...')
+    logger.info('Getting peak sequences ...')
 
     fa = pyfaidx.Fasta(genome)
 
     with open(output_file, 'w') as f:
         for i, (chrom,start,end) in tqdm.tqdm(enumerate(peaks)):
-
-            peak_sequence = fa[chrom][int(start) : int(end)].seq
+            
+            try:
+                peak_sequence = fa[chrom][int(start) : int(end)].seq
+            except KeyError:
+                peak_sequence = 'N'*(int(end) - int(start))
 
             print('>{idx}\n{sequence}'.format(
-                idx = str(i),
-                sequence = peak_sequence.upper()
-            ), file = f, end=  '\n')
+                    idx = str(i),
+                    sequence = peak_sequence.upper()
+                ), file = f, end=  '\n')
+
 
 def list_motif_matrices():
 
@@ -116,16 +122,17 @@ def list_motif_ids():
 
 def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
 
-    logging.info('Scanning peaks for motif hits with p >= {} ...'.format(str(pvalue_threshold)))
+    logger.info('Scanning peaks for motif hits with p >= {} ...'.format(str(pvalue_threshold)))
 
     command = ['moods-dna.py', 
-        '-m', get_motif_glob_str(), 
+        '-m', *list_motif_matrices(), 
         '-s', peak_sequences_file, 
         '-p', str(pvalue_threshold), 
         '--batch']
 
-    logging.info('Building motif background models ...')
+    logger.info('Building motif background models ...')
     process = subprocess.Popen(' '.join(command), stdout=subprocess.PIPE, shell=True, stderr=subprocess.PIPE)
+    #process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     motif_matrices = [os.path.basename(x).strip('.{}'.format(config.get('jaspar','pfm_suffix'))) for x in list_motif_matrices()]
     motif_idx_map = dict(zip(motif_matrices, np.arange(len(motif_matrices))))
@@ -139,7 +146,7 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
             break
         else:
             if i == 0:
-                logging.info('Starting scan ...')
+                logger.info('Starting scan ...')
             i+=1
 
             peak_num, motif, hit_pos, strand, score, site, snp = line.decode().strip().split(',')
@@ -150,12 +157,12 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
             scores.append(float(score))
 
             if i%1000000 == 0:
-                logging.info('Found {} motif hits ...'.format(str(i)))
+                logger.info('Found {} motif hits ...'.format(str(i)))
 
     if not process.poll() == 0:
         raise Exception('Error while canning for motifs: ' + process.stderr.read().decode())
 
-    logging.info('Formatting hits matrix ...')
+    logger.info('Formatting hits matrix ...')
     return sparse.coo_matrix((scores, (peak_indices, motif_indices)), 
         shape = (num_peaks, len(motif_matrices))).tocsr().T.tocsr()
 
@@ -186,7 +193,7 @@ def get_motif_enrichments(peaks, genome, pvalue_threshold = 0.0001):
         hits_matrix = get_motif_hits(temp_fasta_name, len(peaks), pvalue_threshold = pvalue_threshold)
 
         ids, factors = list(zip(*list_motif_ids()))
-        return hits_matrix, ids, factors
+        return hits_matrix, np.array(ids), np.array(factors)
 
     finally:
         os.remove(temp_fasta_name)

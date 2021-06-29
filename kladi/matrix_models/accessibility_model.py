@@ -16,10 +16,10 @@ from scipy.sparse import isspmatrix
 from kladi.matrix_models.scipm_base import BaseModel, get_fc_stack
 from kladi.motif_scanning import moods_scan
 from lisa.core.utils import indices_list_to_sparse_array
-import logging
 from lisa import FromRegions
 import re
-
+from kladi.core.plot_utils import plot_factor_influence
+import matplotlib.pyplot as plt
 
 class ZeroPaddedBinaryMultinomial(pyro.distributions.Multinomial):
     
@@ -185,7 +185,6 @@ class AccessibilityModel(BaseModel):
         
         assert(np.isclose(X.data.astype(np.int64), X.data).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
-        logging.debug('Binarizing accessibility matrix ...')
         X.data = np.ones_like(X.data)
 
         return X
@@ -208,7 +207,7 @@ class AccessibilityModel(BaseModel):
         return dense_matrix.astype(np.int64)
 
 
-    def _get_batches(self, accessibility_matrix, batch_size = 32, bar = False, training = True):
+    def _get_batches(self, accessibility_matrix, batch_size = 32, bar = False, training = True, desc = None):
 
         N = accessibility_matrix.shape[0]
 
@@ -218,7 +217,7 @@ class AccessibilityModel(BaseModel):
         accessibility_matrix = accessibility_matrix.tocsr()
         read_depth = torch.from_numpy(np.array(accessibility_matrix.sum(-1))).to(self.device).type(torch.int32)
 
-        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = bar):
+        for batch_start, batch_end in self._iterate_batch_idx(N, batch_size, bar = bar, desc = desc):
 
             rd_batch = read_depth[batch_start:batch_end]
             reads = accessibility_matrix[batch_start : batch_end]
@@ -226,7 +225,6 @@ class AccessibilityModel(BaseModel):
             exog_peaks = torch.from_numpy(self._get_padded_idx_matrix(reads)).to(self.device)
 
             yield endog_peaks, exog_peaks, rd_batch
-
 
     def _get_save_data(self):
 
@@ -259,10 +257,22 @@ class AccessibilityModel(BaseModel):
                 shape = (len(self.factor_ids), len(self.peaks))
             )
 
+    def save_hits_data(self, filename):
+       torch.save(self._get_save_data(), filename)
+
+    def load_hits_data(self, filename):
+        self._load_save_data(torch.load(filename))
+
+    @staticmethod
+    def _parse_motif_name(motif_name):
+        return [x.upper() for x in re.split('[/::()-]', motif_name)]
+
+    def get_parsed_factor_names(self):
+        return np.array([self._parse_motif_name(factor)[0] for  factor in self.factor_names])
 
     def _argsort_peaks(self, module_num):
         assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
-        return np.argsort(self._score_feature()[module_num, :])
+        return np.argsort(self._score_features()[module_num, :])
 
     def rank_peaks(self, module_num):
         return self.peaks[self._argsort_peaks(module_num)]
@@ -275,8 +285,7 @@ class AccessibilityModel(BaseModel):
         self._check_latent_vars(latent_compositions)
 
         latent_compositions = self._to_tensor(latent_compositions)
-        logging.debug('Finding posterior peak probabilities ...')
-        for batch_start, batch_end in self._iterate_batch_idx(len(latent_compositions), batch_size, bar = True):
+        for batch_start, batch_end in self._iterate_batch_idx(len(latent_compositions), batch_size, bar = True, desc = 'Imputing peaks'):
             yield self.decoder(latent_compositions[batch_start:batch_end, :]).cpu().detach().numpy()
 
     def _validate_hits_matrix(self, hits_matrix):
@@ -304,8 +313,8 @@ class AccessibilityModel(BaseModel):
         new_hits = regions_test.data_interface.project_sparse_matrix(chip_hits, bin_map, num_bins=len(self.peaks))
 
         self.factor_hits = new_hits.T.tocsr()
-        self.factor_names = list(metadata['factor'])
-        self.factor_ids = list(sample_ids)
+        self.factor_names = np.array(metadata['factor'])
+        self.factor_ids = np.array(sample_ids)
 
 
     def get_motif_score(self, latent_compositions):
@@ -325,7 +334,7 @@ class AccessibilityModel(BaseModel):
         return list(zip(self.factor_ids, self.factor_names)), motif_scores
 
 
-    def enrich_TFs(self, module_num, top_quantile = 0.2):
+    def enrich_TFs(self, module_num, top_quantile = 0.2, sort = True):
 
         try:
             self.factor_hits
@@ -336,10 +345,9 @@ class AccessibilityModel(BaseModel):
         assert(isinstance(top_quantile, float) and top_quantile > 0 and top_quantile < 1)
 
         module_idx = self._argsort_peaks(module_num)[-int(self.num_peaks*top_quantile) : ]
-        logging.info('Finding enrichment in top {} peaks ...'.format(str(len(module_idx))))
 
         pvals, test_statistics = [], []
-        for i in tqdm(range(hits_matrix.shape[0])):
+        for i in tqdm(range(hits_matrix.shape[0]), 'Finding enrichments'):
 
             tf_hits = hits_matrix[i,:].indices
             overlap = len(np.intersect1d(tf_hits, module_idx))
@@ -352,7 +360,36 @@ class AccessibilityModel(BaseModel):
             pvals.append(pval)
             test_statistics.append(stat)
 
-        return sorted(list(zip(self.factor_ids, self.factor_names, pvals, test_statistics)), key = lambda x:(x[2], -x[3]))
+        results = list(zip(self.factor_ids, self.factor_names, pvals, test_statistics))
+
+        if sort:
+            return sorted(results, key = lambda x:(x[2], -x[3]))
+        else:
+            return results
+
+    def filter_factors(self, expressed_factors):
+
+        allowed_factors = np.isin(self.get_parsed_factor_names(), expressed_factors)
+
+        self.factor_hits = self.factor_hits[allowed_factors, :]
+        self.factor_ids = self.factor_ids[allowed_factors]
+        self.factor_names = self.factor_names[allowed_factors]
+
+
+    def plot_compare_module_enrichments(self, module1, module2, top_quantiles = (0.2, 0.2), hue = None, palette = 'coolwarm', hue_order = None, 
+        ax = None, figsize = (10,7), legend_label = '', show_legend = True, fontsize = 12, pval_threshold = (1e-5, 1e-5),
+        interactive = False, color = 'grey', label_closeness = 5, max_label_repeats = 5, show_factor_names = None):
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize = figsize)
+
+        _id, factor_names, l1_pvals, _ = list(zip(*self.enrich_TFs(module1, top_quantile = top_quantiles[0], sort = False)))
+        _, _, l2_pvals, _ = list(zip(*self.enrich_TFs(module2, top_quantile = top_quantiles[1], sort = False)))
+        
+        plot_factor_influence(ax, np.array(l1_pvals)+1e-8, np.array(l2_pvals)+1e-8, factor_names, pval_threshold = pval_threshold, hue = hue, hue_order = hue_order, 
+            palette = palette, legend_label = legend_label, show_legend = show_legend, label_closeness = label_closeness, 
+            max_label_repeats = max_label_repeats, axlabels = ('Module {} Enrichments'.format(str(module1)),'Module {} Enrichments'.format(str(module2))), 
+            fontsize = fontsize, interactive = False, color = color)
 
 
     def _insilico_deletion(self, gene_models, deletion_masks, latent_compositions):
@@ -371,8 +408,7 @@ class AccessibilityModel(BaseModel):
 
         del_i, del_j = deletion_masks.row, deletion_masks.col
 
-        logging.info('Calculating insilico-deletion scores ...')
-        with tqdm(total=num_steps) as bar:
+        with tqdm(total=num_steps, desc = 'Calculating insilico-deletion scores') as bar:
             
             state_knockout_scores = []
             for reg_state in reg_states:

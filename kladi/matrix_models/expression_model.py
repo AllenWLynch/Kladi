@@ -25,6 +25,7 @@ from functools import partial
 config = configparser.ConfigParser()
 config.read('kladi/matrix_models/config.ini')
 
+logger = logging.getLogger(__name__)
 
 def grouper(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
@@ -47,7 +48,6 @@ class GeneDevianceModel:
     def fit(self, y_ij):
         
         y_ij = y_ij[:, self.highly_variable]
-        #logging.info('Learning deviance featurization for transcript counts ...')
         self.pi_j_hat = y_ij.sum(axis = 0)/y_ij.sum()
 
         return self
@@ -215,13 +215,7 @@ class ExpressionModel(BaseModel):
 
             '''pyro.sample('obs', 
                         dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
-                        obs= raw_expr)
-
-            log_p_success = (mu + self.epsilon).log() - (mu + self.dispersion + self.epsilon).log()
-            logodds_p = log_p_success - (1 - torch.exp(log_p_success)).log()
-            pyro.sample('obs', 
-                            dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, logits = logodds_p, gate_logits=dropout).to_event(1),
-                            obs= raw_expr)'''
+                        obs= raw_expr)'''
 
 
     def guide(self, raw_expr, encoded_expr, read_depth):
@@ -256,21 +250,16 @@ class ExpressionModel(BaseModel):
         X = self._validate_data(raw_expr)
         assert(isinstance(batch_size, int) and batch_size > 0)
 
-        read_depths, dropouts = [],[]
+        read_depths = []
         for i,batch in enumerate(self._get_batches(X, batch_size = batch_size)):
             raw_expr, encoded_expr, read_depth = batch
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
-            latent_comp = theta_loc.exp()/theta_loc.exp().sum(-1, keepdim = True)
 
-            expr, dropout = self.decoder(latent_comp)
-
-            dropouts.append(dropout.detach().cpu().numpy())
             read_depths.append(np.exp(rd_loc.detach().cpu().numpy()))
 
         read_depth = np.concatenate(read_depths, 0)
-        dropout = np.vstack(dropouts)
 
-        return read_depth, dropout
+        return read_depth
 
 
     def _get_latent_MAP(self, raw_expr, encoded_expr, read_depth):
@@ -280,7 +269,7 @@ class ExpressionModel(BaseModel):
         return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
 
 
-    def _get_batches(self, count_matrix, batch_size = 32, bar = False, training = True):
+    def _get_batches(self, count_matrix, batch_size = 32, bar = False, training = True, desc = None):
         
         N = len(count_matrix)
         
@@ -377,11 +366,14 @@ class ExpressionModel(BaseModel):
 
         if top_n is None:
             top_genes_mask = self._score_features()[module_num,:] > 2
-            return self.genes[top_genes_mask]
 
-        else:
-            assert(isinstance(top_n, int) and top_n > 0)
-            return self.rank_genes(module_num)[-top_n : ]
+            if top_genes_mask.sum() > 200:
+                return self.genes[top_genes_mask]
+            else:
+                top_n = 200
+
+        assert(isinstance(top_n, int) and top_n > 0)
+        return self.rank_genes(module_num)[-top_n : ]
 
 
     def rank_modules(self, gene):
@@ -425,7 +417,7 @@ class ExpressionModel(BaseModel):
             'list': (None, top_genes),
         }
 
-        logging.info('Querying Enrichr with module {} genes.'.format(str(module_num)))
+        logger.info('Querying Enrichr with module {} genes.'.format(str(module_num)))
         response = requests.post(enrichr_url + post_endpoint, files=payload)
         if not response.ok:
             raise Exception('Error analyzing gene list')
@@ -497,7 +489,7 @@ class ExpressionModel(BaseModel):
                 }
         '''
 
-        logging.info('Downloading results ...')
+        logger.info('Downloading results ...')
 
         enrichments = dict()
         for ontology in ontologies:

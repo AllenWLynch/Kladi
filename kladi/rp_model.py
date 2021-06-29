@@ -12,12 +12,15 @@ from pyro.infer.autoguide.initialization import init_to_mean
 from lisa import FromRegions
 from lisa.core import genome_tools
 from lisa.core.data_interface import DataInterface
-import logging
 from collections import Counter
 import numpy as np
 import pickle
 from scipy import sparse
 import re
+from kladi.matrix_models.scipm_base import EarlyStopping
+import glob
+
+logger = logging.getLogger(__name__)
 
 class LogMock:
 
@@ -25,7 +28,7 @@ class LogMock:
         pass
 
     def append(self, *args, **kwargs):
-        logging.info(*args)
+        logger.debug(*args)
 
 class BadGeneException(Exception):
     pass
@@ -34,6 +37,19 @@ class BadGeneException(Exception):
 class RPModeler(FromRegions):
 
     rp_decay = 60000
+
+    @classmethod
+    def save_models(cls, models, prefix):
+        for model in models:
+            model.save(prefix + model.name + '.rpmodel')
+
+    @classmethod
+    def load_models(cls, prefix):
+        models = []
+        for model in glob.glob(prefix + '*.rpmodel'):
+                models.append(RPModelPointEstimator.from_file(model))
+
+        return models
 
     def __init__(self, species, accessibility_model, expression_model):
 
@@ -44,8 +60,9 @@ class RPModeler(FromRegions):
         self.accessibility_model = accessibility_model
         self.expression_model = expression_model
 
+        self.log = LogMock()
         self.data_interface = DataInterface(species, window_size=100, make_new=False,
-            download_if_not_exists=False, log=LogMock(), load_genes=True,
+            download_if_not_exists=False, log=self.log, load_genes=True,
             path = '.emptyh5.h5')
 
         self.num_regions_supplied = len(regions)
@@ -156,7 +173,7 @@ class RPModeler(FromRegions):
         return latent_compositions.copy()
 
     def add_accessibility_params(self, gene_models, accessibility = None, latent_compositions = None):
-        logging.info('Adding peak accessibility to models ...')
+        logger.debug('Adding peak accessibility to models ...')
 
         latent_compositions = self._get_latent_vars(self.accessibility_model, matrix = accessibility,
             latent_comp= latent_compositions)
@@ -166,16 +183,16 @@ class RPModeler(FromRegions):
                 model.add_accessibility_params(imputed_peaks)
 
     def add_expression_params(self, gene_models, raw_expression):
-        logging.info('Adding modeled expression data to models ...')
+        logger.debug('Adding modeled expression data to models ...')
         raw_expression = self.expression_model._validate_data(raw_expression)
-        read_depth, dropout_rate = self.expression_model._get_expression_distribution_parameters(raw_expression)
+        read_depth = self.expression_model._get_expression_distribution_parameters(raw_expression)
 
         for model in gene_models:
             try:
                 gene_idx = np.argwhere(self.expression_model.genes == model.name)[0]
             except IndexError:
                 raise Exception('Gene {} not in RefSeq database for this species'.format(model.name))
-            model.add_expression_params(raw_expression[:,gene_idx], read_depth, dropout_rate[:, gene_idx])
+            model.add_expression_params(raw_expression[:,gene_idx], read_depth)
 
     def get_naive_models(self, gene_symbols):
 
@@ -184,26 +201,26 @@ class RPModeler(FromRegions):
             try:
                 gene_models.append(self._get_gene_model(symbol, naive=True))
             except BadGeneException as err:
-                logging.warn(str(err))
+                logger.warn(str(err))
 
         return gene_models
 
     def train(self, gene_symbols, raw_expression, accessibility_matrix = None, 
-        accessibility_latent_compositions = None, iters = 150):
+        accessibility_latent_compositions = None, iters = 150, learning_rate = 0.1):
 
         gene_models = []
         for symbol in gene_symbols:
             try:
                 gene_models.append(self._get_gene_model(symbol))
             except BadGeneException as err:
-                logging.warn(str(err))
+                logger.warn(str(err))
 
         self.add_accessibility_params(gene_models, accessibility = accessibility_matrix, 
             latent_compositions = accessibility_latent_compositions)
         self.add_expression_params(gene_models, raw_expression)
 
-        logging.info('Training RP models ...')
-        trained_models = [model.train(iters = iters) for model in gene_models]
+        logger.debug('Training RP models ...')
+        trained_models = [model.train(max_iters = iters, learning_rate = learning_rate) for model in tqdm.tqdm(gene_models, desc = 'Training models')]
 
         return trained_models
 
@@ -224,11 +241,11 @@ class RPModeler(FromRegions):
 class PyroRPVI(PyroModule):
     
     def __init__(self, gene_name, *, region_distances, upstream_mask, downstream_mask, 
-        region_score_map, region_mask, use_cuda = True):
+        region_score_map, region_mask, use_cuda = False):
         super().__init__()
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
-        logging.info('Using CUDA: {}'.format(str(self.use_cuda)))
+        logger.debug('Using CUDA: {}'.format(str(self.use_cuda)))
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.to(self.device)
 
@@ -257,11 +274,10 @@ class PyroRPVI(PyroModule):
         self.downstream_weights.append(region_weights[:, self.downstream_mask])
         self.promoter_weights.append(region_weights[:, self.promoter_mask])
 
-    def add_expression_params(self, raw_expression, read_depth, dropout_rate):
+    def add_expression_params(self, raw_expression, read_depth):
 
         self.gene_expr = self.to_tensor(raw_expression)
-        self.read_depth = self.to_tensor(read_depth)
-        self.dropout_rate = self.to_tensor(dropout_rate)
+        self.read_depth = self.to_tensor(read_depth.reshape(-1))
 
     def to_tensor(self, x, requires_grad = False):
         return torch.tensor(x, requires_grad = False).to(self.device)
@@ -270,7 +286,7 @@ class PyroRPVI(PyroModule):
         #print(weights, distances, d)
         return (weights * torch.pow(0.5, distances/(1e3 * d))).sum(-1)
     
-    def forward(self):
+    def forward(self, idx):
 
         with pyro.plate(self.name +"_regions", 3):
             a = pyro.sample(self.name +"_a", dist.HalfNormal(12.))
@@ -281,27 +297,27 @@ class PyroRPVI(PyroModule):
         b = pyro.sample(self.name +"_b", dist.Normal(-10.,3.))
         theta = pyro.sample(self.name +"_theta", dist.Gamma(2., 0.5))
 
-        with pyro.plate(self.name +"_data", self.N, subsample_size=64) as ind:
-
+        with pyro.plate(self.name +"_data", len(idx), subsample_size=64) as ind:
+            
+            ind = torch.tensor(idx[ind])
             expr_rate = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
                 + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
                 + a[2] * self.promoter_weights.index_select(0, ind).sum(-1) \
                 + b
             
             mu = torch.multiply(self.read_depth.index_select(0, ind), torch.exp(expr_rate))
-
-            pyro.deterministic(self.name + '_mu', mu)
-
             p = torch.minimum(mu / (mu + theta), torch.tensor([0.99999]))
+           
+            pyro.sample(self.name + '_obs', dist.NegativeBinomial(total_count = theta, probs = p), obs = self.gene_expr.index_select(0, ind).reshape(-1))
 
-            pyro.sample(self.name +'_obs', 
+            '''pyro.sample(self.name +'_obs', 
                         dist.ZeroInflatedNegativeBinomial(total_count=theta, probs=p, gate_logits = self.dropout_rate.index_select(0, ind).reshape(-1)),
-                        obs= self.gene_expr.index_select(0, ind).reshape(-1))
+                        obs= self.gene_expr.index_select(0, ind).reshape(-1))'''
 
 
-    def train(self, learning_rate = 0.01, iters = 200, decay = 100):
+    def train(self, learning_rate = 0.1, max_iters = 200, decay = 100, test_size = 0.2):
 
-        logging.info('Training {} RP model ...'.format(str(self.name)))
+        logger.debug('Training {} RP model ...'.format(str(self.name)))
         pyro.clear_param_store()
 
         if isinstance(self.upstream_weights, list):
@@ -311,16 +327,34 @@ class PyroRPVI(PyroModule):
             self.promoter_weights = self.to_tensor(np.vstack(self.promoter_weights))
 
         self.N = len(self.read_depth)
+        is_test_set = np.random.rand(self.N) < test_size
+        self.test_idx = np.argwhere(is_test_set)[:,0]
+        self.train_idx = np.argwhere(~is_test_set)[:,0]
 
         self.guide = AutoDiagonalNormal(self, init_loc_fn = init_to_mean)
         
-        adam = pyro.optim.Adam({"lr": learning_rate})
-        svi = SVI(self, self.guide, adam, loss=Trace_ELBO())
+        #adam = pyro.optim.Adam({"lr": learning_rate})
+        scheduler = pyro.optim.ExponentialLR({'optimizer': torch.optim.Adam, 'optim_args': {'lr': learning_rate}, 'gamma': 0.95})
 
-        training_loss = []
-        for j in range(int(iters)):
-            training_loss.append(svi.step())
-                
+        svi = SVI(self, self.guide, scheduler, loss=Trace_ELBO())
+
+        early_stopper = EarlyStopping(patience = 3, tolerance = 1e-4)
+
+        self.training_loss, self.testing_loss = [],[]
+        for j in range(int(max_iters)):
+
+            self.training_loss.append(
+                float(svi.step(self.train_idx)/len(self.train_idx))
+            )
+
+            self.testing_loss.append(
+                float(svi.evaluate_loss(self.test_idx)/len(self.test_idx))
+            )
+
+            if early_stopper.should_stop_training(self.testing_loss[-1]):
+                logger.debug('Stopped training early!')
+                break
+    
         return self.get_MAP_estimator()
 
     def get_MAP_estimator(self):

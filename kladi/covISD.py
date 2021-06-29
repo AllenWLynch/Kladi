@@ -8,6 +8,23 @@ import re
 from sklearn.preprocessing import scale
 import warnings
 from collections import Counter
+from kladi.core.plot_utils import plot_factor_influence
+
+class ClusterISDSplitter:
+
+    def __init__(self, clusters):
+        
+        assert(isinstance(clusters, (list, np.ndarray)))
+        self.clusters = np.ravel(np.array(clusters))
+        self.cluster_ids = np.unique(self.clusters)
+
+    def __len__(self):
+        return len(self.clusters)
+
+    def _iterate_all_bins(self, bin_size = None):
+
+        for cluster_id in self.cluster_ids:
+            yield (None, None, self.clusters == cluster_id)
 
 class CovISD:
 
@@ -36,10 +53,6 @@ class CovISD:
 
         return latent_compositions.copy()
 
-    @staticmethod
-    def _parse_motif_name(motif_name):
-        return [x.upper() for x in re.split('[/::()-]', motif_name)]
-
     def _get_trajectory_latent_vars(self, atac_latent_compositions, expression_latent_compositions, bin_size = 100):
 
         state_idx, tree_position, bin_masks = list(zip(*self.pseudotime_model._iterate_all_bins(bin_size = bin_size)))
@@ -59,7 +72,7 @@ class CovISD:
         
         modeled_factor_idx, factor_expression_idx = [],[]
         for idx, factor_name in enumerate(factor_names):
-            for parsed_name in self._parse_motif_name(factor_name):
+            for parsed_name in self.accessibility_model._parse_motif_name(factor_name):
                 if parsed_name in expression_genes_map:
                     modeled_factor_idx.append(idx)
                     factor_expression_idx.append(expression_genes_map[parsed_name])
@@ -175,7 +188,7 @@ class CovISD:
     def get_TF_gene_interaction_matrix(self):
         return self.tf_gene_cov_score, self.gene_names, self.factor_names
     
-    def plot_compare_gene_modules(self, module1, module2, top_n_genes=(200,200), pval_threshold = (1e-3, 1e-3),
+    def plot_compare_gene_modules(self, module1, module2, top_n_genes=(None,None), pval_threshold = (1e-3, 1e-3),
         palette = 'coolwarm', ax = None, figsize = (10,7), fontsize = 12, interactive = False, label_closeness = 5, max_label_repeats = 5):
         
         gs1 = self.expression_model.get_top_genes(module1, top_n_genes[0])
@@ -186,8 +199,8 @@ class CovISD:
         
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            module1_factor_activations = scale(self.expression_model._get_beta()[module1][:, np.newaxis])[factor_gene_idx_map, :]
-            module2_factor_activations = scale(self.expression_model._get_beta()[module2][:, np.newaxis])[factor_gene_idx_map, :]
+            module1_factor_activations = self.expression_model._score_features()[module1][:, np.newaxis][factor_gene_idx_map, :]
+            module2_factor_activations = self.expression_model._score_features()[module2][:, np.newaxis][factor_gene_idx_map, :]
         
         hue = np.ravel(module1_factor_activations - module2_factor_activations)
         
@@ -205,38 +218,10 @@ class CovISD:
         
         if ax is None:
             fig, ax = plt.subplots(1,1,figsize = figsize)
-            
-        if not hue is None:
-            assert(isinstance(hue, (list, np.ndarray)))
-            assert(len(hue) == len(self.factor_names))
-            
-            cell_colors = map_colors(ax, hue, palette, 
-                add_legend = show_legend, hue_order = hue_order, 
-                cbar_kwargs = dict(location = 'right', pad = 0.01, shrink = 0.5, aspect = 15, anchor = (1.05, 0.5), label = legend_label),
-                legend_kwargs = dict(loc="upper right", markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large',
-                            bbox_to_anchor=(1.05, 0.5), label = legend_label))
-        else:
-            cell_colors = color
 
         factor_names, l1_pvals, _ = list(zip(*self.get_driver_TFs(genelist1, sort=False)))
         _, l2_pvals, _ = list(zip(*self.get_driver_TFs(genelist2, sort=False)))
         
-        l1_pvals = np.array(l1_pvals)
-        l2_pvals = np.array(l2_pvals)
-
-        name_mask = np.logical_or(l1_pvals < pval_threshold[0], l2_pvals < pval_threshold[1])
-
-        x = -np.log10(l1_pvals)
-        y = -np.log10(l2_pvals)
-        
-        if not interactive:
-            ax.scatter(x, y, c = cell_colors)
-            layout_labels(ax = ax, x = x[name_mask], y = y[name_mask], label_closeness = label_closeness, 
-                fontsize = fontsize, label = np.array(factor_names)[name_mask], max_repeats = max_label_repeats)
-
-            ax.set(xlabel = axlabels[0], ylabel = axlabels[1])
-            ax.spines["right"].set_visible(False)
-            ax.spines["top"].set_visible(False)
-            return ax
-        else:
-            raise NotImplementedError()
+        plot_factor_influence(ax, l1_pvals, l2_pvals, factor_names, pval_threshold = pval_threshold, hue = hue, hue_order = hue_order, 
+            palette = palette, legend_label = legend_label, show_legend = show_legend, label_closeness = label_closeness, 
+            max_label_repeats = max_label_repeats, axlabels = axlabels, fontsize = fontsize, interactive = False, color = color)
