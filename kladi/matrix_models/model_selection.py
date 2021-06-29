@@ -15,7 +15,7 @@ class ModuleObjective:
         min_epochs = 15, max_epochs = 50, 
         min_dropout = 0.01, max_dropout = 0.3,
         batch_sizes = [32,64,128], seed = 2556, 
-        score_fn = None, prune_penalty = 0.001):
+        score_fn = None, prune_penalty = 0.01):
 
         self.params = []
         self.trial_scores = []
@@ -71,7 +71,7 @@ class ModuleObjective:
             if step == 0:
                 trial.report(1.0, 0)
 
-            trial.report(np.mean(cv_scores) + self.prune_penalty * 0.5**step, step+1)
+            trial.report(np.mean(cv_scores) + (self.prune_penalty * 0.5**step), step+1)
                 
             if trial.should_prune():
                 trial.set_user_attr('batches_trained', step+1)
