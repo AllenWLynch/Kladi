@@ -11,7 +11,7 @@ from tqdm import tqdm
 import warnings
 
 from scipy.sparse import isspmatrix
-from kladi.matrix_models.scipm_base import BaseModel, get_fc_stack
+from kladi.matrix_models.scipm_base import BaseModel, get_fc_stack, Decoder
 import configparser
 import requests
 import json
@@ -82,17 +82,22 @@ class GeneDevianceModel:
 
 class ExpressionEncoder(nn.Module):
 
-    def __init__(self, num_genes, num_topics, hidden, dropout, num_layers):
+    def __init__(self, num_genes, num_topics, num_other_features, hidden, dropout, num_layers):
         super().__init__()
         output_batchnorm_size = 2*num_topics + 2
 
         self.num_topics = num_topics
+
+        self.first_layer = get_fc_stack(layer_dims = [num_genes + 1, hidden], dropout = dropout, skip_nonlin = False)
         self.fc_layers = get_fc_stack(
-            layer_dims = [num_genes + 1, *[hidden]*(num_layers-2), output_batchnorm_size],
+            layer_dims = [hidden + num_other_features, *[hidden]*(num_layers-3), output_batchnorm_size],
             dropout = dropout, skip_nonlin = True
         )
         
-    def forward(self, X):
+    def forward(self, X, other_features):
+
+        X = self.first_layer(X)
+        X = torch.hstack([X, other_features])
 
         X = self.fc_layers(X)
 
@@ -105,29 +110,13 @@ class ExpressionEncoder(nn.Module):
         return theta_loc, theta_scale, rd_loc, rd_scale
 
 
-class ExpressionDecoder(nn.Module):
-    # Base class for the decoder net, used in the model
-    def __init__(self, num_genes, num_topics, dropout):
-        super().__init__()
-        self.beta = nn.Linear(num_topics, num_genes, bias = False)
-        self.bn = nn.BatchNorm1d(num_genes)
-        self.drop = nn.Dropout(dropout)
-        #self.fc = nn.Linear(num_topics, num_genes, bias = False)
-        #self.bn2 = nn.BatchNorm1d(num_genes)
-
-    def forward(self, latent_composition):
-        inputs = self.drop(latent_composition)
-        # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1) #, self.bn2(self.fc(inputs))
-
-
 class ExpressionModel(BaseModel):
     '''
     Class
     '''
     
-    def __init__(self, genes, highly_variable = None, num_modules = 15, decoder_dropout = 0.2, 
-        encoder_dropout = 0.1, hidden = 128, use_cuda = True, num_layers = 3, seed = None):
+    def __init__(self, genes, highly_variable = None, num_modules = 15, num_other_features = 0, num_covariates = 0, 
+        decoder_dropout = 0.2, encoder_dropout = 0.1, hidden = 128, use_cuda = True, num_layers = 3, seed = None):
         '''
         Initialize ExpressionModel instance. 
 
@@ -161,6 +150,8 @@ class ExpressionModel(BaseModel):
         
         kwargs = dict(
             num_modules = num_modules,
+            num_covariates = num_covariates,
+            num_other_features = num_other_features,
             num_exog_features = len(self.genes),
             highly_variable = highly_variable,
             hidden = hidden,
@@ -171,9 +162,10 @@ class ExpressionModel(BaseModel):
             seed = seed,
         )
         
-        super().__init__(ExpressionEncoder, ExpressionDecoder, **kwargs)
+        super().__init__(ExpressionEncoder, Decoder, **kwargs)
 
-    def model(self, raw_expr, encoded_expr, read_depth):
+    def model(self, observations, genomic_features, read_depth, 
+            other_features, covariates):
 
         pyro.module("decoder", self.decoder)
 
@@ -186,63 +178,50 @@ class ExpressionModel(BaseModel):
 
         theta_loc = self._get_prior_mu(initial_counts, self.K)
         theta_scale = self._get_prior_std(initial_counts, self.K)
-
-        #print(theta_loc, theta_scale)
         
-        with pyro.plate("cells", encoded_expr.shape[0]):
+        with pyro.plate("cells", observations.shape[0]):
 
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
             
             theta = theta/theta.sum(-1, keepdim = True)
+            theta = torch.hstack([theta, covariates])
 
             read_scale = pyro.sample(
-                'read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1)
+                'read_depth', dist.LogNormal(torch.log(read_depth), 2.).to_event(1)
             )
 
-            #read_scale = torch.minimum(read_scale, self.max_scale)
-            # conditional distribution of 𝑤𝑛 is defined as
-            # 𝑤𝑛|𝛽,𝜃 ~ Categorical(𝜎(𝛽𝜃))
-            #expr_rate, dropout = self.decoder(theta)
             expr_rate = self.decoder(theta)
 
             mu = torch.multiply(read_scale, expr_rate)
-
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
 
-            pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = raw_expr)
-
-            '''pyro.sample('obs', 
-                        dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
-                        obs= raw_expr)'''
+            pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = observations)
 
 
-    def guide(self, raw_expr, encoded_expr, read_depth):
+    def guide(self, observations, genomic_features, read_depth, 
+            other_features, covariates):
 
         pyro.module("encoder", self.encoder)
 
         _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
-        counts_mu = pyro.param('counts_mu', _counts_mu * encoded_expr.new_ones((self.num_topics,))).to(self.device)
-        counts_std = pyro.param('counts_std', np.sqrt(_counts_var) * encoded_expr.new_ones((self.num_topics,)), 
+        counts_mu = pyro.param('counts_mu', _counts_mu * genomic_features.new_ones((self.num_topics,))).to(self.device)
+        counts_std = pyro.param('counts_std', np.sqrt(_counts_var) * genomic_features.new_ones((self.num_topics,)), 
                 constraint = constraints.positive).to(self.device)
 
         with pyro.plate("topics", self.num_topics) as k:
             initial_counts = pyro.sample("a", dist.LogNormal(counts_mu[k], counts_std[k]))
-
         
-        with pyro.plate("cells", encoded_expr.shape[0]):
-            # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution,
-            # where μ and Σ are the encoder network outputs
-            theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
+        with pyro.plate("cells", genomic_features.shape[0]):
+            
+            theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(genomic_features, other_features)
 
             theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
-            )
+                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
 
             read_depth = pyro.sample(
-                "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
-            )
+                "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1))
 
 
     def _get_expression_distribution_parameters(self, raw_expr, batch_size = 32):
@@ -269,7 +248,8 @@ class ExpressionModel(BaseModel):
         return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
 
 
-    def _get_batches(self, count_matrix, batch_size = 32, bar = False, training = True, desc = None):
+    def _get_batches(self, count_matrix, other_features = None, covariates = None, 
+            batch_size = 32, bar = False, training = True, desc = None):
         
         N = len(count_matrix)
         
@@ -279,7 +259,11 @@ class ExpressionModel(BaseModel):
             self.deviance_model = GeneDevianceModel(self.highly_variable).fit(count_matrix)
 
         for batch_start, batch_end in self._iterate_batch_idx(N, batch_size):
-            yield self._featurize(count_matrix[batch_start : batch_end, :])
+            yield self._featurize(
+                count_matrix[batch_start : batch_end], 
+                other_features[batch_start : batch_end] if not other_features is None else [],
+                covariates[batch_start : batch_end] if not covariates is None else []
+            )
 
     def _validate_data(self, X):
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
@@ -329,14 +313,16 @@ class ExpressionModel(BaseModel):
         return self
 
 
-    def _featurize(self, count_matrix):
+    def _featurize(self, count_matrix, other_features, covariates):
 
         encoded_counts = self.deviance_model.transform(count_matrix)
         read_depth = count_matrix.sum(-1, keepdims = True)
 
         encoded_counts = np.hstack([encoded_counts, np.log(read_depth)])
 
-        return self._to_tensor(count_matrix), self._to_tensor(encoded_counts), self._to_tensor(read_depth)
+        return self._to_tensor(count_matrix), self._to_tensor(encoded_counts), self._to_tensor(read_depth), \
+                    self._to_tensor(other_features), self._to_tensor(covariates)
+
 
     def rank_genes(self, module_num):
         '''

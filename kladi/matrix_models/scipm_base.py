@@ -53,6 +53,7 @@ class OneCycleLR_Wrapper(torch.optim.lr_scheduler.OneCycleLR):
         max_lr = kwargs.pop('max_lr')
         super().__init__(optimizer, max_lr, **kwargs)
 
+
 def encoder_layer(input_dim, output_dim, nonlin = True, dropout = 0.2):
     layers = [nn.Linear(input_dim, output_dim), nn.BatchNorm1d(output_dim)]
     if nonlin:
@@ -66,6 +67,21 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
         encoder_layer(input_dim, output_dim, nonlin= not ((i >= (len(layer_dims) - 2)) and skip_nonlin), dropout = dropout)
         for i, (input_dim, output_dim) in enumerate(zip(layer_dims[:-1], layer_dims[1:]))
     ])
+    
+class Decoder(nn.Module):
+    # Base class for the decoder net, used in the model
+    def __init__(self, num_genes, num_topics, num_covariates, dropout):
+        super().__init__()
+        self.beta = nn.Linear(num_topics + num_covariates, num_genes, bias = False)
+        self.bn = nn.BatchNorm1d(num_genes)
+        self.drop = nn.Dropout(dropout)
+        #self.fc = nn.Linear(num_topics, num_genes, bias = False)
+        #self.bn2 = nn.BatchNorm1d(num_genes)
+
+    def forward(self, latent_composition):
+        inputs = self.drop(latent_composition)
+        # the output is σ(βθ)
+        return F.softmax(self.bn(self.beta(inputs)), dim=1) #, self.bn2(self.fc(inputs))
 
 class BaseModel(nn.Module):
 
@@ -73,6 +89,8 @@ class BaseModel(nn.Module):
 
     def __init__(self, encoder_model, decoder_model,*,
             num_modules,
+            num_other_features,
+            num_covariates,
             num_exog_features,
             highly_variable,
             hidden,
@@ -109,8 +127,8 @@ class BaseModel(nn.Module):
         if not use_cuda:
             logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
 
-        self.decoder = decoder_model(self.num_exog_features, num_modules, decoder_dropout)
-        self.encoder = encoder_model(self.num_endog_features, num_modules, 
+        self.decoder = Decoder(self.num_exog_features, num_modules, num_covariates, decoder_dropout)
+        self.encoder = encoder_model(self.num_endog_features, num_modules, num_other_features,
             hidden, encoder_dropout, num_layers, **encoder_kwargs)
             
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
