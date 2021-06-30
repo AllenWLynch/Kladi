@@ -27,7 +27,11 @@ class ModuleObjective:
         else:
             self.cv = cv
         self.estimator = estimator
-        self.X = X
+
+        if not isinstance(X, (list, tuple)):
+            self.X = (X, None, None)
+        else:
+            self.X = X
 
         self.min_modules = min_modules
         self.max_modules = max_modules
@@ -58,15 +62,16 @@ class ModuleObjective:
         trial.set_user_attr('batches_trained', 0)
         cv_scores = []
 
-        for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X)):
+        for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X[0])):
 
-            train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
+            #train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
             
-            self.estimator.fit(train_counts)
-            if self.score_fn is None:
-                cv_scores.append(self.estimator.score(test_counts))
-            else:
-                cv_scores.append(self.score_fn(self.estimator, test_counts))
+            train_features = self.estimator._split_features(self.X, train_idx)
+            test_features = self.estimator._split_features(self.X, test_idx)
+
+            self.estimator.fit(train_features)
+            
+            cv_scores.append(self.estimator.score(test_features))
 
             if step == 0:
                 trial.report(1.0, 0)

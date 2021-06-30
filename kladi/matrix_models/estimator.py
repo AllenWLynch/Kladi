@@ -41,7 +41,7 @@ class ExpressionTrainer(BaseEstimator):
     def __init__(self, features = None, highly_variable = None, 
         num_modules = 15, encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, num_layers = 3,
         min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32,
-         use_cuda = True, seed = None): 
+         use_cuda = True, seed = None, num_other_features = 0, num_covariates = 0): 
 
         self.features = features
         self.num_modules = num_modules
@@ -56,6 +56,8 @@ class ExpressionTrainer(BaseEstimator):
         self.max_learning_rate = max_learning_rate
         self.num_layers = num_layers
         self.seed = seed
+        self.num_other_features = num_other_features
+        self.num_covariates = num_covariates
 
     def _get_score_fn(self, X):
         return None
@@ -69,7 +71,7 @@ class ExpressionTrainer(BaseEstimator):
 
         est = self.base_estimator(self.features, highly_variable = self.highly_variable, num_modules = self.num_modules,
             decoder_dropout = self.decoder_dropout, encoder_dropout = self.encoder_dropout, hidden = self.hidden, num_layers = self.num_layers,
-            use_cuda = self.use_cuda, seed = self.seed)
+            use_cuda = self.use_cuda, seed = self.seed, num_other_features = self.num_other_features, num_covariates = self.num_covariates)
 
         return est
 
@@ -234,6 +236,26 @@ class ExpressionTrainer(BaseEstimator):
         print('Trial Information:')
         for trial in study.trials:
             print(get_trial_desc(trial))
+
+
+    def _split_features(self, X, idx):
+        if isinstance(X, (list, tuple)):
+            
+            counts = X[0][idx].copy()
+
+            other_features = None
+            if self.num_other_features > 0:
+                other_features = X[1][idx].copy()
+
+            covars = None
+            if self.num_covariates > 0:
+                covars = covars[idx].copy()
+
+            return (counts, other_features, covars)
+
+        else:
+            assert(self.num_other_features == 0 and self.num_covariates == 0)
+            return X[idx].copy()
 
 
     def tune_hyperparameters(self, X, iters = 200, cv = 5, min_modules = 5, max_modules = 55, 

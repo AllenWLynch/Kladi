@@ -163,7 +163,7 @@ class ExpressionModel(BaseModel):
         )
         
         super().__init__(ExpressionEncoder, Decoder, **kwargs)
-
+        
     def model(self, observations, genomic_features, read_depth, 
             other_features, covariates):
 
@@ -230,7 +230,7 @@ class ExpressionModel(BaseModel):
         assert(isinstance(batch_size, int) and batch_size > 0)
 
         read_depths = []
-        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size)):
+        for i,batch in enumerate(self._get_batches(*X, batch_size = batch_size)):
             encoded_expr = batch[2]
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
 
@@ -241,14 +241,15 @@ class ExpressionModel(BaseModel):
         return read_depth
 
 
-    def _get_latent_MAP(self, X):
-        theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(X[2])
+    def _get_latent_MAP(self, observations, genomic_features, read_depth, 
+            other_features, covariates):
+        theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(genomic_features, other_features)
 
         Z = theta_loc.cpu().detach().numpy()
         return np.exp(Z)/np.exp(Z).sum(-1, keepdims = True)
 
 
-    def _get_batches(self, count_matrix, other_features = None, covariates = None, 
+    def _get_batches(self, count_matrix, other_features = None, covariates = None,*,
             batch_size = 32, bar = False, training = True, desc = None):
         
         N = len(count_matrix)
@@ -265,20 +266,7 @@ class ExpressionModel(BaseModel):
                 covariates[batch_start : batch_end] if not covariates is None else []
             )
 
-    def _validate_nongenomic_features(self, X, desired_shape):
-
-        assert(isinstance(X, np.ndarray) or isspmatrix(X))
-        if isspmatrix(X):
-            X = np.array(X.todense())
-
-        if desired_shape[-1] == 0:
-            assert(X.shape == (1,0))
-        else:
-           assert(X.shape == desired_shape)
-
-        return X.astype(np.float32)
-
-    def _validate_counts(self, X):
+    def _validate_genomic_features(self, X):
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
         
         if isspmatrix(X):
@@ -291,19 +279,7 @@ class ExpressionModel(BaseModel):
 
         return X.astype(np.float32)
 
-    def _validate_data(self, X):
-        
-        if isinstance(X, (list, tuple)):
-            counts = X[0]
-
-        counts = self._validate_counts(counts)
-
-        return (
-            counts, 
-            self._validate_nongenomic_features(X[1], (len(counts), self.num_other_features)) if self.num_other_features > 0 else [],
-            self._validate_nongenomic_features(X[2], (len(counts), self.num_covariates) if self.num_covariates > 0 else [])
-        )
-
+    
     def impute(self, latent_compositions):
         '''
         Compute imputed gene expression values using cells' latent variable representations.

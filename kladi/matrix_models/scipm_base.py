@@ -1,6 +1,8 @@
 
 
 from functools import partial
+from numpy.core.fromnumeric import var
+from numpy.lib.function_base import cov
 import pyro
 import pyro.distributions as dist
 import torch
@@ -16,6 +18,7 @@ import logging
 from kladi.matrix_models.ilr import ilr
 from math import ceil
 import time
+from scipy.sparse import isspmatrix
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,11 @@ class BaseModel(nn.Module):
         self.num_endog_features = int(highly_variable.sum())
         self.num_exog_features = num_exog_features
 
+        assert(isinstance(num_other_features, int) and num_other_features >= 0)
+        assert(isinstance(num_covariates, int) and num_covariates >= 0)
+        self.num_other_features = num_other_features
+        self.num_covariates = num_covariates
+
         self.use_cuda = torch.cuda.is_available() and use_cuda
         if not use_cuda:
             logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
@@ -191,12 +199,12 @@ class BaseModel(nn.Module):
         X = self._validate_data(X)
 
         batch_loss = []
-        for batch in self._get_batches(X, batch_size = batch_size, bar = False):
+        for batch in self._get_batches(*X, batch_size = batch_size, bar = False):
 
             loss = float(self.svi.evaluate_loss(*batch))
             batch_loss.append(loss)
 
-        return np.array(batch_loss).sum() #loss is negative log-likelihood
+        return np.array(batch_loss).sum()/(X[0].shape[0] * self.num_exog_features) #loss is negative log-likelihood
 
     def _score_features(self):
         score = np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var())
@@ -249,7 +257,7 @@ class BaseModel(nn.Module):
         self.eval()
         logger.debug('Predicting latent variables ...')
         latent_vars = []
-        for i,batch in enumerate(self._get_batches(X, batch_size = batch_size, bar = True, training = False, desc = 'Predicting latent vars')):
+        for i,batch in enumerate(self._get_batches(*X, batch_size = batch_size, bar = True, training = False, desc = 'Predicting latent vars')):
             latent_vars.append(self._get_latent_MAP(*batch))
 
         theta = np.vstack(latent_vars)
@@ -259,9 +267,37 @@ class BaseModel(nn.Module):
     def get_UMAP_features(self, X, batch_size = 256):
         return ilr(self.predict(X, batch_size=batch_size))
 
-    def _validate_data(self):
-        raise NotImplementedError()
+    def _validate_nongenomic_features(self, X, desired_shape):
 
+        assert(isinstance(X, np.ndarray) or isspmatrix(X))
+        if isspmatrix(X):
+            X = np.array(X.todense())
+
+        if desired_shape[-1] == 0:
+            assert(X.shape == (1,0))
+        else:
+           assert(X.shape == desired_shape)
+
+        return X.astype(np.float32)
+
+    def _validate_data(self, X):
+        
+        if isinstance(X, (list, tuple)):
+            counts = self._validate_genomic_features(X[0])
+
+            other_features = []
+            if self.num_other_features > 0:
+                other_features = self._validate_nongenomic_features(X[1], (len(counts), self.num_other_features))
+
+            covars = []
+            if self.num_covariates > 0:
+                covars = self._validate_nongenomic_features(X[2], (len(counts), self.num_covariates))
+
+            return (counts, other_features, covars)
+
+        else:
+            assert(self.num_other_features == 0 and self.num_covariates == 0)
+            return (self._validate_genomic_features(X), [], [])
     @staticmethod
     def _warmup_lr_decay(epoch,*,n_batches, lr_decay):
         return min(1., epoch/n_batches)*(lr_decay**int(epoch/n_batches))
@@ -279,7 +315,7 @@ class BaseModel(nn.Module):
         min_learning_rate = 1e-6, max_learning_rate = 1, batch_size = 32):
     
         X = self._validate_data(X)
-        n_batches = self.get_num_batches(X.shape[0], batch_size)
+        n_batches = self.get_num_batches(X[0].shape[0], batch_size)
 
         eval_steps = ceil((n_batches * num_epochs)/eval_every)
         learning_rates = np.exp(np.linspace(np.log(min_learning_rate), np.log(max_learning_rate), eval_steps+1))
@@ -297,7 +333,7 @@ class BaseModel(nn.Module):
             for epoch in range(num_epochs):
                 #train step
                 self.train()
-                for batch in self._get_batches(X, batch_size = batch_size):
+                for batch in self._get_batches(*X, batch_size = batch_size):
                     step_loss += float(self.svi.step(*batch))
                     batches_complete+=1
                     
@@ -433,7 +469,7 @@ class BaseModel(nn.Module):
                     
                 self.train()
                 running_loss = 0.0
-                for batch in self._get_batches(X, batch_size = batch_size):
+                for batch in self._get_batches(*X, batch_size = batch_size):
                     try:
                         running_loss += float(self.svi.step(*batch))
                     except ValueError:
@@ -443,7 +479,7 @@ class BaseModel(nn.Module):
                         scheduler.step()
                 
                 #epoch cleanup
-                epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
+                epoch_loss = running_loss/(X[0].shape[0] * self.num_exog_features)
                 self.training_loss.append(epoch_loss)
                 recent_losses = self.training_loss[-5:]
 
@@ -521,7 +557,7 @@ class BaseModel(nn.Module):
                 #train step
                 self.train()
                 running_loss = 0.0
-                for batch in self._get_batches(X, batch_size = batch_size):
+                for batch in self._get_batches(*X, batch_size = batch_size):
                     running_loss += self.svi.step(*batch)
                     scheduler.step()
                 
@@ -558,7 +594,7 @@ class BaseModel(nn.Module):
                 
     def score(self, X):
         self.eval()
-        return self._get_logp(X)/(X.shape[0] * self.num_exog_features)
+        return self._get_logp(X)
 
     def _to_tensor(self, val):
         return torch.tensor(val).to(self.device)
