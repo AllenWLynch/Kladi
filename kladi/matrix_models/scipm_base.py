@@ -69,7 +69,7 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
 
 class BaseModel(nn.Module):
 
-    I = 50
+    I = 100
 
     def __init__(self, encoder_model, decoder_model,*,
             num_modules,
