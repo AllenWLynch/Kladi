@@ -21,6 +21,8 @@ import logging
 from math import ceil
 from kladi.core.plot_utils import map_plot
 from functools import partial
+from kladi.matrix_models.scipm_base import Decoder
+
 
 config = configparser.ConfigParser()
 config.read('kladi/matrix_models/config.ini')
@@ -105,22 +107,6 @@ class ExpressionEncoder(nn.Module):
         return theta_loc, theta_scale, rd_loc, rd_scale
 
 
-class ExpressionDecoder(nn.Module):
-    # Base class for the decoder net, used in the model
-    def __init__(self, num_genes, num_topics, dropout):
-        super().__init__()
-        self.beta = nn.Linear(num_topics, num_genes, bias = False)
-        self.bn = nn.BatchNorm1d(num_genes)
-        self.drop = nn.Dropout(dropout)
-        #self.fc = nn.Linear(num_topics, num_genes, bias = False)
-        #self.bn2 = nn.BatchNorm1d(num_genes)
-
-    def forward(self, latent_composition):
-        inputs = self.drop(latent_composition)
-        # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1) #, self.bn2(self.fc(inputs))
-
-
 class ExpressionModel(BaseModel):
     '''
     Class
@@ -171,7 +157,7 @@ class ExpressionModel(BaseModel):
             seed = seed,
         )
         
-        super().__init__(ExpressionEncoder, ExpressionDecoder, **kwargs)
+        super().__init__(ExpressionEncoder, Decoder, **kwargs)
 
     def model(self, raw_expr, encoded_expr, read_depth):
 

@@ -44,6 +44,19 @@ class EarlyStopping:
 
         return False
 
+class Decoder(nn.Module):
+    # Base class for the decoder net, used in the model
+    def __init__(self, num_genes, num_topics, dropout):
+        super().__init__()
+        self.beta = nn.Linear(num_topics, num_genes, bias = False)
+        self.bn = nn.BatchNorm1d(num_genes)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, inputs):
+        inputs = self.drop(inputs)
+        # the output is σ(βθ)
+        return F.softmax(self.bn(self.beta(inputs)), dim=1)
+
 class ModelParamError(ValueError):
     pass
 
@@ -69,7 +82,7 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
 
 class BaseModel(nn.Module):
 
-    I = 100
+    I = 50
 
     def __init__(self, encoder_model, decoder_model,*,
             num_modules,
@@ -441,7 +454,7 @@ class BaseModel(nn.Module):
 
                 epoch+=1
 
-                if early_stopper.should_stop_training(recent_losses[-1]) and epoch > num_epochs:
+                if early_stopper.should_stop_training(recent_losses[-1]) or epoch > num_epochs + 5:
                     break
 
         except KeyboardInterrupt:

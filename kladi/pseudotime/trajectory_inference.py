@@ -376,7 +376,7 @@ class PalantirTrajectoryInference:
         def sigmoid(x):
             return 1/(1+np.exp(-x))
 
-        strictness = np.sqrt((1 - start_prob - 0.2) / start_prob)
+        strictness = np.sqrt((1 - min(start_prob, 0.5) - 0.2) / start_prob)
         adaptive_scale = strictness*sigmoid(stretch*(pseudotime/pseudotime[end_cell] - shift)) - 0.05
         
         return start_prob*adaptive_scale + start_prob

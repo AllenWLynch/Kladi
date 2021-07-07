@@ -20,6 +20,7 @@ from lisa import FromRegions
 import re
 from kladi.core.plot_utils import plot_factor_influence
 import matplotlib.pyplot as plt
+from kladi.matrix_models.scipm_base import Decoder
 
 class ZeroPaddedBinaryMultinomial(pyro.distributions.Multinomial):
     
@@ -65,19 +66,6 @@ class DANEncoder(nn.Module):
         theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])   
 
         return theta_loc, theta_scale
-
-class Decoder(nn.Module):
-    # Base class for the decoder net, used in the model
-    def __init__(self, num_genes, num_topics, dropout):
-        super().__init__()
-        self.beta = nn.Linear(num_topics, num_genes, bias = False)
-        self.bn = nn.BatchNorm1d(num_genes)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, inputs):
-        inputs = self.drop(inputs)
-        # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1)
 
 
 class AccessibilityModel(BaseModel):
@@ -386,7 +374,7 @@ class AccessibilityModel(BaseModel):
         _id, factor_names, l1_pvals, _ = list(zip(*self.enrich_TFs(module1, top_quantile = top_quantiles[0], sort = False)))
         _, _, l2_pvals, _ = list(zip(*self.enrich_TFs(module2, top_quantile = top_quantiles[1], sort = False)))
         
-        plot_factor_influence(ax, np.array(l1_pvals)+1e-8, np.array(l2_pvals)+1e-8, factor_names, pval_threshold = pval_threshold, hue = hue, hue_order = hue_order, 
+        plot_factor_influence(ax, np.array(l1_pvals)+1e-300, np.array(l2_pvals)+1e-300, factor_names, pval_threshold = pval_threshold, hue = hue, hue_order = hue_order, 
             palette = palette, legend_label = legend_label, show_legend = show_legend, label_closeness = label_closeness, 
             max_label_repeats = max_label_repeats, axlabels = ('Module {} Enrichments'.format(str(module1)),'Module {} Enrichments'.format(str(module2))), 
             fontsize = fontsize, interactive = False, color = color)

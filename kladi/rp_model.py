@@ -106,7 +106,7 @@ class RPModeler(FromRegions):
 
         return valid_regions
 
-    def _get_gene_model(self, gene_symbol, naive = False):
+    def _get_gene_model(self, gene_symbol, naive = False, decay = 10):
 
         try:
             gene_idx = np.argwhere(np.array([x[3] for x in self.genes]) == gene_symbol)[0]
@@ -151,7 +151,7 @@ class RPModeler(FromRegions):
         else:
             return RPModelPointEstimator(gene_symbol,
                 a_up = 1., a_down=1., a_promoter=1.,
-                distance_up=np.e, distance_down=np.e, b = 0,
+                distance_up=np.log(decay), distance_down=np.log(decay), b = 0,
                 upstream_mask=upstream_mask,downstream_mask=downstream_mask,
                 promoter_mask=~np.logical_or(upstream_mask, downstream_mask),
                 upstream_distances=region_distances[upstream_mask],
@@ -194,12 +194,14 @@ class RPModeler(FromRegions):
                 raise Exception('Gene {} not in RefSeq database for this species'.format(model.name))
             model.add_expression_params(raw_expression[:,gene_idx], read_depth)
 
-    def get_naive_models(self, gene_symbols):
+    def get_naive_models(self, gene_symbols, decay = 10000):
+
+        assert(isinstance(decay, (int, float)) and decay > 0)
 
         gene_models = []
         for symbol in gene_symbols:
             try:
-                gene_models.append(self._get_gene_model(symbol, naive=True))
+                gene_models.append(self._get_gene_model(symbol, naive=True, decay = decay))
             except BadGeneException as err:
                 logger.warn(str(err))
 

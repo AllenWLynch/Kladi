@@ -94,7 +94,7 @@ class CovISD:
             (tf_expr - tf_expr.mean(-1, keepdims = True))[np.newaxis,:, :]).sum(-1) \
             / (tf_expr.shape[-1] * tf_expr.std(-1)[np.newaxis, :] * isd_tensor.std(-1)))        
 
-        tf_mask = isd_tf_expr_corr > 0.0
+        tf_mask = isd_tf_expr_corr > -0.2
 
         return np.multiply(covariance_matrix, tf_mask)
 
