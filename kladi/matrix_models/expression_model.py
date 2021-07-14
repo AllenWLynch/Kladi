@@ -180,28 +180,16 @@ class ExpressionModel(BaseModel):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
             theta = pyro.sample(
                 "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
-            
             theta = theta/theta.sum(-1, keepdim = True)
-
-            read_scale = pyro.sample(
-                'read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1)
-            )
-
-            #read_scale = torch.minimum(read_scale, self.max_scale)
-            # conditional distribution of 𝑤𝑛 is defined as
-            # 𝑤𝑛|𝛽,𝜃 ~ Categorical(𝜎(𝛽𝜃))
-            #expr_rate, dropout = self.decoder(theta)
             expr_rate = self.decoder(theta)
 
-            mu = torch.multiply(read_scale, expr_rate)
+            read_scale = pyro.sample('read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1))
+            
 
+            mu = torch.multiply(read_scale, expr_rate)
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
 
             pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = raw_expr)
-
-            '''pyro.sample('obs', 
-                        dist.ZeroInflatedNegativeBinomial(total_count= self.dispersion, probs=p, gate_logits=dropout).to_event(1),
-                        obs= raw_expr)'''
 
 
     def guide(self, raw_expr, encoded_expr, read_depth):
@@ -230,22 +218,31 @@ class ExpressionModel(BaseModel):
                 "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
             )
 
-
     def _get_expression_distribution_parameters(self, raw_expr, batch_size = 32):
+        
+        def detach(x):
+            return x.detach().cpu().numpy()
 
         X = self._validate_data(raw_expr)
         assert(isinstance(batch_size, int) and batch_size > 0)
 
-        read_depths = []
+        rd_locs, rd_scales, softmax_denoms = [], [], []
         for i,batch in enumerate(self._get_batches(X, batch_size = batch_size)):
             raw_expr, encoded_expr, read_depth = batch
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
 
-            read_depths.append(np.exp(rd_loc.detach().cpu().numpy()))
+            rd_locs.append(detach(rd_loc))
+            rd_scales.append(detach(rd_scale))
 
-        read_depth = np.concatenate(read_depths, 0)
+            theta = theta_loc.exp()/theta_loc.exp().sum(-1, keepdim = True)
+            softmax_denoms.append(
+                detach(self.decoder.get_softmax_denom(theta))
+            )
 
-        return read_depth
+        rd_loc = np.concatenate(rd_locs, 0)
+        rd_scale = np.concatenate(rd_scales, 0)
+        softmax_denom = np.concatenate(softmax_denoms, 0)
+        return rd_loc, rd_scale, softmax_denom
 
 
     def _get_latent_MAP(self, raw_expr, encoded_expr, read_depth):

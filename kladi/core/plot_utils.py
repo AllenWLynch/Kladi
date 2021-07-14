@@ -34,7 +34,10 @@ def map_plot(func, *data, plots_per_row = 3, height =4, aspect = 1.5):
 
 def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwargs = {}, cbar_kwargs = {}):
 
-    assert(isinstance(c, np.ndarray))
+    assert(isinstance(c, (np.ndarray, list)))
+    
+    if isinstance(c, list):
+        c = np.array(c)
 
     if np.issubdtype(c.dtype, np.number):
 

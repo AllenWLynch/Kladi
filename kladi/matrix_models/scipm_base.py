@@ -57,6 +57,9 @@ class Decoder(nn.Module):
         # the output is σ(βθ)
         return F.softmax(self.bn(self.beta(inputs)), dim=1)
 
+    def get_softmax_denom(self, inputs):
+        return self.bn(self.beta(inputs)).exp().sum(-1)
+
 class ModelParamError(ValueError):
     pass
 

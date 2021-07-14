@@ -1,0 +1,61 @@
+
+config : 'config.yaml'
+
+rule filter_barcodes:
+    input: '{workdir}/{track_id}.barcodes'
+    output: '{workdir}/{track_id}.filtered.bed'
+    params:
+        barcodes = lambda wildcards : config[wildcards.track_id]['fragment_file']
+    shell: 
+        'python bin/filter_barcodes.py --barcodes {params.barcodes} --fragments {input} > {output}
+
+
+rule chromsort_bed:
+    input: '{workdir}/{track_id}.filtered.bed'
+    output: '{workdir}/{track_id}.filtered.chrom_sorted.bed'
+    shell:
+        'sort -k1,1 {input} > {output}'
+
+rule read_depth_norm:
+    input: '{workdir}/{track_id}.filtered.bed'
+    output: '{workdir}/{track_id}.fragments.read_depth.txt'
+    shell: 'wc -l {input} > {output}'
+
+def get_rd_normalization(wildcards):
+    with open('{workdir}/{track_id}.fragments.read_depth.txt'.format(wildcards.workdir, wildcards.track_id), 'r') as f:
+        rd = float(f.read().strip())
+    return 1/rd
+
+rule fragment_pileup:
+    input: 
+        fragmens = '{workdir}/{track_id}.filtered.chrom_sorted.bed',
+        read_depth = '{workdir}/{track_id}.fragments.read_depth.txt'
+    output: '{workdir}/{track_id}.fragments.bedgraph'
+    params:
+        genome = lambda wildcards : config[wildcards.track_id]['genome']
+        read_depth = get_rd_normalization
+    shell:
+        'bedtools genomecov -g {params.genome} -i {input} -bg -scale {params.read_depth} > {output}
+
+rule BAM_sort:
+    params: 
+        bam = lambda wildcards: config[wildcards.track_id]['bam']
+    output: '{workdir}/{track_id}.sorted.bam'
+    shell:
+        'samtools sort {params.bam} {output}'
+
+
+rule BAM_pileup:
+    input: lambda wildcards : '{workdir}/{track_id}.sorted.bam' if not config[wildcards.track_id + '.is_sorted'] else None
+    output: '{workdir}/{track_id}.bam.bedgraph'
+    shell:
+        'bedtools genomecov -ibam {input} -bg > {output}
+
+
+rule bedgraph_to_bigwig:
+    input: '{workdir}/{track_id}.{type}.bedgraph'
+    output: '{workdir}/{track_id}.{type}.bigwig'
+    params:
+        genome = lambda wildcards : config[wildcards.track_id]['genome']
+    shell:
+        'bedGraphToBigWig {input} {params.genome} {output}'

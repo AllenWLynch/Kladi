@@ -268,12 +268,12 @@ class AccessibilityModel(BaseModel):
     def get_top_peaks(self, module_num, top_n = 20000):
         return self.rank_peaks(module_num)[-top_n : ]
 
-    def _batch_impute(self, latent_compositions, batch_size = 256):
+    def _batch_impute(self, latent_compositions, batch_size = 256, bar = True):
 
         self._check_latent_vars(latent_compositions)
 
         latent_compositions = self._to_tensor(latent_compositions)
-        for batch_start, batch_end in self._iterate_batch_idx(len(latent_compositions), batch_size, bar = True, desc = 'Imputing peaks'):
+        for batch_start, batch_end in self._iterate_batch_idx(len(latent_compositions), batch_size, bar = bar, desc = 'Imputing peaks'):
             yield self.decoder(latent_compositions[batch_start:batch_end, :]).cpu().detach().numpy()
 
     def _validate_hits_matrix(self, hits_matrix):

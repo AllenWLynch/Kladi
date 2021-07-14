@@ -50,7 +50,6 @@ class ModuleObjective:
             seed = np.random.randint(0, 2**32 - 1),
         )
 
-        
         self.estimator.set_params(**params)
 
         trial.set_user_attr('trial_params', params)
