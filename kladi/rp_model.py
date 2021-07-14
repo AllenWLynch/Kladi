@@ -299,7 +299,18 @@ class CisModeler(FromRegions):
 
         logger.debug('Training RP models ...')
         for model in tqdm.tqdm(self.gene_models, desc = 'Training models', disable = not bar):
-            model.fit(**self.get_fit_params())
+            params = self.get_fit_params()
+            successfully_fit, attempts = False, 1
+            while not successfully_fit:
+                try:
+                    model.fit(**params)
+                    successfully_fit=True
+                except ValueError:
+                    if attempts < 5:
+                        params['learning_rate']/=10
+                        attempts+=1
+                    else:
+                        raise ValueError('Model {} could not be trained!'.format(model.gene))
 
         return self
 
@@ -484,6 +495,7 @@ class PyroRPVI(PyroModule):
 
         N = len(self.rd_loc)
         iters_per_epoch = N//batch_size
+        min_iters = 10
 
         test_set = np.random.rand(N) < 0.2
         train_set = ~test_set
@@ -493,8 +505,28 @@ class PyroRPVI(PyroModule):
         lr_function = partial(_warmup_lr_decay, n_batches_per_epoch = iters_per_epoch, lr_decay = decay)
         scheduler = pyro.optim.LambdaLR({'optimizer': SGD, 'optim_args': {'lr': learning_rate, 'momentum' : momentum}, 
             'lr_lambda' : lambda e : lr_function(e)})
+        #scheduler = pyro.optim.PyroOptim(torch.optim.LBFGS, {'lr' : learning_rate}, {})
         svi = SVI(self, self.guide, scheduler, loss=TraceMeanField_ELBO())
         early_stopper = EarlyStopping(patience = patience, tolerance = 1e-4)
+
+        '''class MyModel(nn.Module):
+            def __init__(self, ...):
+                ...
+
+            def model(self, batch):
+                ....
+
+            def guide(self, batch):
+                ...
+
+        model = MyModel(...)
+
+        elbo = pyro.infer.Trace_ELBO()
+        optim = torch.optim.SGD(model.parameters())  # or LBFGS etc
+        for batch in data:
+            optim.zero_grad()
+            elbo.loss_and_grads(model.model, model.guide, batch)
+            optim.step()'''
 
         self._fix_features()
 
@@ -513,7 +545,7 @@ class PyroRPVI(PyroModule):
 
             #if j%iters_per_epoch == 0:
             #    self.training_loss.append(running_loss)
-            if early_stopper.should_stop_training(self.testing_loss[-1]):
+            if j > min_iters and early_stopper.should_stop_training(self.testing_loss[-1]):
                 logger.debug('Stopped training early!')
                 break
 
@@ -568,6 +600,9 @@ class PyroRPVI(PyroModule):
 
 class TransModel(PyroModule, BaseEstimator):
 
+    bn_keys = ['batchnorm.weight', 'batchnorm.bias', 
+        'batchnorm.running_mean', 'batchnorm.running_var', 'batchnorm.num_batches_tracked']
+
     def __init__(self,*, accessibility_model, expression_model, dropout = 0.2, learning_rate = 0.1, batch_size = 64, 
         num_iters = 200, seed = None, decay = 0.95, momentum = 0.9):
         super().__init__()
@@ -577,7 +612,7 @@ class TransModel(PyroModule, BaseEstimator):
         self.batch_size = batch_size
         self.num_iters = num_iters
         self.dropout = dropout
-        self.seed = None
+        self.seed = seed
         self.decay = decay
         self.momentum = momentum
 
@@ -590,14 +625,14 @@ class TransModel(PyroModule, BaseEstimator):
         param_distributions = dict(
             dropout = stats.uniform(0, 0.3),
             seed = stats.randint(1, 2**32-1),
-            learning_rate = stats.loguniform(1e-6, 0.1),
+            learning_rate = stats.loguniform(1e-6, 1e-3),
             batch_size = [32,64,128,256,512],
             decay = stats.loguniform(0.9, 1.0),
-            momentum = stats.uniform(0,0.999),
+            momentum = stats.loguniform(0.1,0.999),
         )
 
         def _score(estimator, X, y):
-            return estimator.score(X, y)
+            return -estimator.score(X, y)
 
         self.searcher = RandomizedSearchCV(self, param_distributions, n_iter = tune_iters, 
             verbose = verbose, refit = False, cv = cv, scoring = _score)
@@ -607,16 +642,27 @@ class TransModel(PyroModule, BaseEstimator):
         self.set_params(**best_params)
 
         return best_params
-        
-        return self.search
 
+
+    def _set_seeds(self):
+
+        seed = self.seed
+        if seed is None:
+            seed = int(time.time() * 1e7)%(2**32-1)
+
+        torch.manual_seed(seed)
+        pyro.set_rng_seed(seed)
+        np.random.seed(seed)
 
     def _get_weights(self):
+
         pyro.clear_param_store()
+        self._set_seeds()
+
         self.beta = torch.nn.Linear(self.accessibility_model.num_topics, 
             self.expression_model.num_exog_features,
             bias = False)
-        self.dropout = torch.nn.Dropout(self.dropout)
+        self.drop = torch.nn.Dropout(self.dropout)
         self.batchnorm = torch.nn.BatchNorm1d(self.expression_model.num_exog_features)
         self.guide = AutoDiagonalNormal(self, init_loc_fn = init_to_mean)
 
@@ -627,12 +673,12 @@ class TransModel(PyroModule, BaseEstimator):
 
         pyro.module("batchnorm", self.batchnorm)
         pyro.module("beta", self.beta)
-        pyro.module("dropout", self.dropout)
+        pyro.module("dropout", self.drop)
 
         with pyro.plate('gene_plate', self.expression_model.num_exog_features):
             theta = pyro.sample("theta", dist.Gamma(2., 0.5))
 
-        activation = self.beta(self.dropout(Z))
+        activation = self.beta(self.drop(Z))
 
         pyro.deterministic('activation', activation)
 
@@ -659,6 +705,22 @@ class TransModel(PyroModule, BaseEstimator):
         
         return raw_expression, torch.tensor(atac_latent_compositions), rd_loc, rd_scale, softmax_denom
 
+    def save(self, filename):
+
+        state_dict = {k : self.state_dict()[k] for k in 
+            self.bn_keys + ['posterior_mean','beta.weight']}
+        torch.save(state_dict, filename)
+
+    def load(self, filename):
+
+        self._get_weights()
+
+        state_dict = torch.load(filename)
+        
+        self.beta.load_state_dict({'weight' : state_dict['beta.weight']})
+        self.posterior_mean = state_dict['posterior_mean']
+        self.batchnorm.load_state_dict({param.split('.')[1] : state_dict[param] for param in self.bn_keys})
+
 
     def predict(self,raw_expression, accessibility_matrix = None, accessibility_latent_compositions = None):
         
@@ -667,7 +729,7 @@ class TransModel(PyroModule, BaseEstimator):
 
         expression, Z, rd_loc, rd_scale, softmax_denom = self._featurize(raw_expression, atac_latent_compositions)
 
-        return self.beta(self.dropout(Z)).detach().cpu().numpy()
+        return self.beta(Z).detach().cpu().numpy()
 
 
     def _get_logp(self,raw_expression, accessibility_matrix = None, 
@@ -683,7 +745,7 @@ class TransModel(PyroModule, BaseEstimator):
         NB = get_expression_distribution(f_Z=self.beta(Z), 
             batchnorm=self.batchnorm, rd_loc=rd_loc, rd_scale = rd_scale, 
             softmax_denom = softmax_denom.reshape((-1,1)), 
-            dispersion = self.guide.get_posterior().mean.exp())
+            dispersion = self.posterior_mean.exp())
 
         return NB.log_prob(expression).detach().cpu().numpy()
 
@@ -705,6 +767,7 @@ class TransModel(PyroModule, BaseEstimator):
 
         N = len(atac_latent_compositions)
         iters_per_epoch = N//self.batch_size
+        min_epochs = 20
         
         lr_function = partial(_warmup_lr_decay, n_batches_per_epoch = iters_per_epoch, lr_decay = self.decay)
         scheduler = pyro.optim.LambdaLR({'optimizer': SGD, 'optim_args': {'lr': self.learning_rate, 'momentum' : self.momentum}, 
@@ -721,7 +784,7 @@ class TransModel(PyroModule, BaseEstimator):
             )       
             scheduler.step()
             
-            if early_stopper.should_stop_training(self.training_loss[-1]):
+            if j > min_epochs and early_stopper.should_stop_training(self.training_loss[-1]):
                 logger.debug('Stopped training early!')
                 break
 
