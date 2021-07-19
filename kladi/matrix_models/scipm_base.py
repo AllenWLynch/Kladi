@@ -23,24 +23,29 @@ class EarlyStopping:
 
     def __init__(self, 
                  tolerance = 1e-4,
-                 patience=3):
+                 patience=3,
+                 convergence_check = True):
         self.tolerance = tolerance,
         self.patience = patience
         self.wait = 0
         self.best_loss = 1e15
+        self.convergence_check = convergence_check
 
     def should_stop_training(self, current_loss):
         
         if current_loss is None:
             pass
         else:
-            if (current_loss - self.best_loss) < -self.tolerance[0]:
-                self.best_loss = current_loss
+            if ((current_loss - self.best_loss) < -self.tolerance[0]) or \
+                (self.convergence_check and ((current_loss - self.best_loss) > 10*self.tolerance[0])):
                 self.wait = 0
             else:
                 if self.wait >= self.patience:
                     return True
                 self.wait += 1
+
+            if current_loss < self.best_loss:
+                self.best_loss = current_loss
 
         return False
 
@@ -393,8 +398,7 @@ class BaseModel(nn.Module):
     def get_coherence(self, module_num, counts):
         pass
 
-    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, 
-        test_X=None, patience = 3, tolerance = 1e-4):
+    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32):
 
         assert(isinstance(num_epochs, int) and num_epochs > 0)
         assert(isinstance(batch_size, int) and batch_size > 0)
@@ -413,21 +417,11 @@ class BaseModel(nn.Module):
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 
-        early_stopper = EarlyStopping(tolerance=tolerance, patience=patience)
         self.training_loss, self.testing_loss, self.num_epochs_trained = [],[],0
         try:
 
-            t = trange(num_epochs+1, desc = 'Epoch 0', leave = True) if self.training_bar else range(num_epochs+1)
-            _t = iter(t)
-            epoch = 0
-
-            while True:
-                #train step
-
-                try:
-                    next(_t)
-                except StopIteration:
-                    pass
+            t = trange(num_epochs, desc = 'Epoch 0', leave = True) if self.training_bar else range(num_epochs)
+            for epoch in t:
                     
                 self.train()
                 running_loss = 0.0
@@ -437,28 +431,18 @@ class BaseModel(nn.Module):
                     except ValueError:
                         raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
 
-                    if epoch < num_epochs:
-                        scheduler.step()
+                    scheduler.step()
                 
                 #epoch cleanup
                 epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
                 self.training_loss.append(epoch_loss)
                 recent_losses = self.training_loss[-5:]
 
-                if not test_X is None:
-                    self.testing_loss.append(self.score(test_X))
-                    recent_losses = self.testing_loss[-5:]
-
                 if self.training_bar:
                     t.set_description("Epoch {} done. Recent losses: {}".format(
                         str(epoch + 1),
                         ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
                     ))
-
-                epoch+=1
-
-                if early_stopper.should_stop_training(recent_losses[-1]) or epoch > num_epochs + 5:
-                    break
 
         except KeyboardInterrupt:
             logger.warn('Interrupted training.')

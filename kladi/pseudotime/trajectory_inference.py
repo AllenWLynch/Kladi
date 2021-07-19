@@ -260,7 +260,7 @@ class PalantirTrajectoryInference:
             pseudotime = new_traj
             iteration += 1
 
-        self.pseudotime = pseudotime - pseudotime.min() #make 0 minimum
+        self.pseudotime = minmax_scale(pseudotime) #make 0 minimum
         self.waypoint_weights = W
 
         if len(terminal_states) > 0:
@@ -810,7 +810,8 @@ class PalantirTrajectoryInference:
 
     def plot_feature_stream(self, features, labels = None, color = 'black', log_pseudotime = True, figsize = (20,10),
         scale_features = False, center_baseline = True, bin_size = 25, palette = 'Set3', ax=None, title = None, show_legend = True,
-        max_bar_height = 0.5, hide_feature_threshold = 0.03, linecolor = 'grey', linewidth = 0.1, annotate_streams = False, clip = 5):
+        max_bar_height = 0.5, hide_feature_threshold = 0.03, linecolor = 'grey', linewidth = 0.1, annotate_streams = False, clip = 5,
+        min_pseudotime = 0.05):
 
         assert(isinstance(max_bar_height, float) and max_bar_height > 0 and max_bar_height < 1)
         assert(isinstance(features, np.ndarray))
@@ -870,6 +871,14 @@ class PalantirTrajectoryInference:
 
                 bin_means = np.vstack(bin_means)
                 bin_times = np.array(bin_times)
+
+                if isinstance(end_node, int):
+                    state_time_len = bin_times[-1] - bin_times[0]
+                    if state_time_len < min_pseudotime:
+                        bin_times = bin_times * min_pseudotime/state_time_len
+                else:
+                    if bin_times[-1] < tree_layout[end_node][1]:
+                        bin_times = bin_times * tree_layout[end_node][1]/bin_times[-1]
 
                 if log_pseudotime:
                     bin_times = np.log2(bin_times + 1)

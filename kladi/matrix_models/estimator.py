@@ -76,8 +76,7 @@ class ExpressionTrainer(BaseEstimator):
     def _get_fit_params(self):
         return dict(
             batch_size = self.batch_size, 
-            min_learning_rate = self.min_learning_rate, max_learning_rate = self.max_learning_rate, 
-            tolerance = self.tolerance, patience = self.patience
+            min_learning_rate = self.min_learning_rate, max_learning_rate = self.max_learning_rate,
         )
 
 

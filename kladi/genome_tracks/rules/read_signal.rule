@@ -1,61 +1,60 @@
 
+
 config : 'config.yaml'
 
-rule filter_barcodes:
-    input: '{workdir}/{track_id}.barcodes'
-    output: '{workdir}/{track_id}.filtered.bed'
-    params:
-        barcodes = lambda wildcards : config[wildcards.track_id]['fragment_file']
-    shell: 
-        'python bin/filter_barcodes.py --barcodes {params.barcodes} --fragments {input} > {output}
-
-
-rule chromsort_bed:
-    input: '{workdir}/{track_id}.filtered.bed'
-    output: '{workdir}/{track_id}.filtered.chrom_sorted.bed'
-    shell:
-        'sort -k1,1 {input} > {output}'
-
-rule read_depth_norm:
-    input: '{workdir}/{track_id}.filtered.bed'
-    output: '{workdir}/{track_id}.fragments.read_depth.txt'
-    shell: 'wc -l {input} > {output}'
-
-def get_rd_normalization(wildcards):
-    with open('{workdir}/{track_id}.fragments.read_depth.txt'.format(wildcards.workdir, wildcards.track_id), 'r') as f:
-        rd = float(f.read().strip())
-    return 1/rd
-
-rule fragment_pileup:
+rule filter_fragment_regions:
     input: 
-        fragmens = '{workdir}/{track_id}.filtered.chrom_sorted.bed',
-        read_depth = '{workdir}/{track_id}.fragments.read_depth.txt'
-    output: '{workdir}/{track_id}.fragments.bedgraph'
+        regions = '{workdir}/regions.bed',
+        fragment_file = lambda w : config['sources'][w.source_id]
+    output:
+        '{workdir}/{source_id}-filtered_fragments.bed'
+    shell:
+        'bedtools intersect -a {input.fragment_file} -b {regions} -sorted -wa > {output}'
+
+rule filter_fragment_barcodes:
+    input:
+        fragment_file = rule.filter_fragment_regions.output,
+        barcodes = '{workdir}/{track_id}-fragment_signal-barcodes.txt'
+    output:
+        '{workdir}/{track_id}-fragment_signal-{source_id}-barcode_filtered_fragments.bed'
+    shell:
+        'python bin/filter_barcodes.py {input.fragment_file} {input.barcodes} > {output}'
+
+rule count_fragments:
+    input:
+        rule.filter_fragment_barcodes.output
+    output:
+        '{workdir}/{track_id}-fragment_signal-{source_id}-fragcount.txt'
+    shell:
+        'wc -l {input} > {output}'
+
+def get_fragment_count(w):
+    with open('{workdir}/{track_id}-fragment_signal-{source_id}-fragcount.txt'.format(
+        workdir = w.workdir, track_id = w.track_id, source_id = w.source_id
+    ), 'r') as f:
+        read_depth = int(f.read().strip())
+
+    return read_depth/config[w.track_id]['norm_constant']
+
+rule fragments_to_bedgraph:
+    input:
+        fragments = rule.filter_fragment_barcodes.output
+        read_depth = rule.count_fragments.output
+    output:
+        '{workdir}/{track_id}-fragment_signal-{source_id}-pileup.bedgraph'
     params:
-        genome = lambda wildcards : config[wildcards.track_id]['genome']
-        read_depth = get_rd_normalization
+        norm = get_fragment_count
+        genome = lambda w : config[w.track_id]['genome_file']
     shell:
-        'bedtools genomecov -g {params.genome} -i {input} -bg -scale {params.read_depth} > {output}
-
-rule BAM_sort:
-    params: 
-        bam = lambda wildcards: config[wildcards.track_id]['bam']
-    output: '{workdir}/{track_id}.sorted.bam'
-    shell:
-        'samtools sort {params.bam} {output}'
-
-
-rule BAM_pileup:
-    input: lambda wildcards : '{workdir}/{track_id}.sorted.bam' if not config[wildcards.track_id + '.is_sorted'] else None
-    output: '{workdir}/{track_id}.bam.bedgraph'
-    shell:
-        'bedtools genomecov -ibam {input} -bg > {output}
+        'bedtools genomecov -g {params.genome} -i {input} -scale {params.norm} -bga > {output}'
 
 
 rule bedgraph_to_bigwig:
-    input: '{workdir}/{track_id}.{type}.bedgraph'
-    output: '{workdir}/{track_id}.{type}.bigwig'
+    input:
+        rule.fragments_to_bedgraph.output
+    output:
+        '{workdir}/{track_id}-fragment_signal-{source_id}-pileup.bigwig'
     params:
-        genome = lambda wildcards : config[wildcards.track_id]['genome']
+        genome = lambda w : config[w.track_id]['genome_file']
     shell:
         'bedGraphToBigWig {input} {params.genome} {output}'

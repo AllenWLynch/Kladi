@@ -6,7 +6,6 @@ import pyro
 from pyro.nn.module import PyroModule
 from pyro.infer.autoguide import AutoDiagonalNormal, AutoDelta
 import pyro.distributions as dist
-#from pyro.optim import Adam
 from torch.optim import Adam, SGD
 from pyro.infer import SVI, TraceMeanField_ELBO, Predictive
 from pyro.infer.autoguide.initialization import init_to_sample, init_to_mean
@@ -22,7 +21,9 @@ from kladi.matrix_models.scipm_base import EarlyStopping
 import glob
 from sklearn.model_selection import ParameterSampler, KFold, RandomizedSearchCV
 from sklearn.base import BaseEstimator
-from functools import partial
+from functools import partial, wraps
+from pyro import poutine
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,11 @@ class LogMock:
 class BadGeneException(Exception):
     pass
 
+class ModelingError(Exception):
+    pass
 
 def _warmup_lr_decay(step,*,n_batches_per_epoch, lr_decay):
-    return min(1., step/n_batches_per_epoch)*(lr_decay**int(step/n_batches_per_epoch))
+    return min(1., (step + 1)/(n_batches_per_epoch + 1))*(lr_decay**int(max(0, step - n_batches_per_epoch)))
 
 
 def _get_latent_vars(model, latent_comp = None, matrix = None):
@@ -63,20 +66,44 @@ def get_expression_distribution(f_Z,*, batchnorm, rd_loc, rd_scale, softmax_deno
     else:
         read_depth = rd_loc.exp()
 
-    rate =  batchnorm(f_Z).exp()/softmax_denom
+    prediction = batchnorm(f_Z)
+    pyro.deterministic('prediction', prediction)
+
+    rate =  prediction.exp()/softmax_denom
     mu = read_depth * rate
 
     p = torch.minimum(mu / (mu + dispersion), torch.tensor([0.99999], requires_grad = False))
-
     return dist.NegativeBinomial(total_count = dispersion, probs = p)
+
+
+def register_input(func):
+
+    @wraps(func)
+    def process_input(self,*args, accessibility_latent_compositions=None, accessibility_matrix=None, expression = None, **kwargs):
+
+        assert(not expression is None)
+        latent_comp = _get_latent_vars(self.accessibility_model, latent_comp = accessibility_latent_compositions,
+            matrix = accessibility_matrix)
+
+        self.add_accessibility_params(accessibility_matrix, latent_comp)
+        self.add_expression_params(expression)
+
+        return func(self, *args, **kwargs)
+    
+    return process_input
+
+def knockout_generator(func):
+
+    def 
 
 
 class CisModeler(FromRegions):
 
     rp_decay = 60000
 
-    def __init__(self, species,*,accessibility_model, expression_model, genes = None, 
-        max_iters = 150, learning_rate = 0.001, batch_size = 64, decay = 0.95, momentum = 0.1):
+    def __init__(self, species,*,accessibility_model, expression_model, genes = None,  use_trans_features = False,
+        max_iters = 150, learning_rate = 0.1, use_SGD = False, test_size = 0.2, restarts = 5,
+        batch_size = 64, decay = 0.95, momentum = 0.1):
 
         assert(species in ['mm10','hg38'])
         regions = accessibility_model.peaks.tolist()
@@ -85,8 +112,14 @@ class CisModeler(FromRegions):
         self.accessibility_model = accessibility_model
         self.expression_model = expression_model
 
-        self.set_fit_params(max_iters = max_iters, learning_rate = learning_rate,
-            batch_size = batch_size, decay = decay, momentum = momentum)
+        self.use_SGD = use_SGD
+        self.learning_rate = learning_rate
+        self.max_iters = max_iters
+        self.batch_size = batch_size
+        self.decay = decay
+        self.momentum = momentum
+        self.test_size = test_size
+        self.restarts = restarts
 
         self.log = LogMock()
         self.data_interface = DataInterface(species, window_size=100, make_new=False,
@@ -109,7 +142,7 @@ class CisModeler(FromRegions):
         self.gene_models = []
         for symbol in genes:
             try:
-                self.gene_models.append(self._get_gene_model(symbol))
+                self.gene_models.append(self._get_gene_model(symbol, use_trans_features))
             except BadGeneException as err:
                 logger.warn(str(err))
 
@@ -151,7 +184,7 @@ class CisModeler(FromRegions):
 
         return valid_regions
 
-    def _get_gene_model(self, gene_symbol):
+    def _get_gene_model(self, gene_symbol, use_trans_features):
 
         try:
             gene_idx = np.argwhere(np.array([x[3] for x in self.refseq_genes]) == gene_symbol)[0]
@@ -190,10 +223,12 @@ class CisModeler(FromRegions):
             upstream_mask = upstream_mask,
             downstream_mask = downstream_mask,
             region_score_map = self.region_score_map,
-            region_mask = region_mask
+            region_mask = region_mask,
+            use_trans_features = use_trans_features,
+            use_SGD = self.use_SGD
         )
 
-    def add_accessibility_params(self, accessibility = None, latent_compositions = None):
+    def add_accessibility_params(self, accessibility, latent_compositions):
         logger.debug('Adding peak accessibility to models ...')
 
         latent_compositions = _get_latent_vars(self.accessibility_model, matrix = accessibility,
@@ -202,9 +237,17 @@ class CisModeler(FromRegions):
         for model in self.gene_models:
             model.clear_features()
 
-        for imputed_peaks in self.accessibility_model._batch_impute(latent_compositions, bar = False):
+        #for imputed_peaks in self.accessibility_model._batch_impute(latent_compositions, bar = False):
+        for start, end in self.accessibility_model._iterate_batch_idx(accessibility.shape[0], 512):
+            batch_peaks = accessibility[start : end]
+            batch_peaks.data = np.ones_like(batch_peaks.data)
+            batch_peaks = np.array(batch_peaks.todense()).astype(float)
             for model in self.gene_models:
-                model.add_accessibility_params(imputed_peaks)
+                model.add_accessibility_params(batch_peaks)
+                
+        for model in self.gene_models:
+            model.trans_features = model.to_tensor(latent_compositions)
+
 
     def add_expression_params(self, raw_expression):
         logger.debug('Adding modeled expression data to models ...')
@@ -226,8 +269,12 @@ class CisModeler(FromRegions):
         self.momentum = momentum
 
     def get_fit_params(self):
-        return dict(max_iters = self.max_iters, learning_rate = self.learning_rate,
-            batch_size = self.batch_size, decay = self.decay, momentum = self.momentum)
+        if not self.use_SGD:
+            return dict(learning_rate = self.learning_rate, max_iters = self.max_iters)
+        else:
+            return dict(batch_size = self.batch_size, momentum = self.momentum,
+                learning_rate = self.learning_rate, decay = self.decay, test_size = self.test_size,
+                restarts = self.restarts, max_iters = self.max_iters)
 
     def get_model(self, gene):
 
@@ -236,26 +283,23 @@ class CisModeler(FromRegions):
 
         return self.gene_models[model_idx]
 
-    def tune_hyperparameters(self, raw_expression, accessibility_matrix = None, 
-        accessibility_latent_compositions = None, cv = KFold(5), tune_iters = 50,
+
+    @register_input
+    def tune_hyperparameters(self, cv = KFold(5), tune_iters = 50,
         num_trial_models = 50, verbose = 2):
 
-        latent_compositions = _get_latent_vars(self.accessibility_model, matrix = accessibility_matrix,
-            latent_comp= accessibility_latent_compositions)
-
-        self.add_accessibility_params(accessibility = None, 
-            latent_compositions = latent_compositions)
-        self.add_expression_params(raw_expression)
+        N = len(self.gene_models[0])
 
         candidate_genes = np.intersect1d(self.expression_model.genes[self.expression_model.highly_variable], self.get_modeled_genes())
         trial_genes = np.random.choice(candidate_genes, size = num_trial_models, replace = False)
-        #trial_models = np.random.choice(self.gene_models, size= num_trial_models, replace = False)
 
         trial_models = [self.get_model(gene) for gene in trial_genes]
 
         class ModelMapper(CisModeler, BaseEstimator):
 
-            def __init__(self, expression_model, accessibility_model, gene_models, *,learning_rate = 0.1, decay = 0.95, batch_size = 64, max_iters = 200, momentum = 0.1):
+            def __init__(self, expression_model, accessibility_model, gene_models, *, use_SGD = False,
+                learning_rate = 0.1, decay = 0.95, batch_size = 64, max_iters = 200, momentum = 0.1, test_size = 0.2,
+                restarts = 5):
                 self.gene_models = gene_models
                 self.expression_model = expression_model
                 self.accessibility_model = accessibility_model
@@ -264,61 +308,61 @@ class CisModeler(FromRegions):
                 self.batch_size = batch_size
                 self.max_iters = max_iters
                 self.momentum = momentum
+                self.test_size = test_size
+                self.restarts = restarts
+                self.use_SGD = use_SGD
 
-            def fit(self, X, y):
-                return super().fit(X, accessibility_latent_compositions = y, bar = False)
+            def fit(self, train_idx):
+                for model in self.gene_models:
+                    model.fit(train_idx=train_idx, **self.get_fit_params())
 
-            def score(self, X, y):
-                return -super().score(X, accessibility_latent_compositions = y, bar = False)
+                return self
 
-        mapper = ModelMapper(self.expression_model, self.accessibility_model, trial_models)
+            def score(self, test_idx):
+                return np.mean([-model.score(test_idx)
+                    for model in self.gene_models])
 
-        params = dict(
-            batch_size = [32,64,128,256,512],
-            max_iters = [200],
-            learning_rate = stats.loguniform(1e-5, 0.01),
-            decay = stats.loguniform(0.9, 1.0),
-            momentum = stats.loguniform(0.1, 0.999),
-        )
+        mapper = ModelMapper(self.expression_model, self.accessibility_model, trial_models, use_SGD = self.use_SGD,
+            test_size = self.test_size, restarts = self.restarts)
+        params = self._get_param_space()
+        self.searcher = RandomizedSearchCV(mapper, params, cv = cv, n_iter = tune_iters, refit = False,
+            verbose = verbose)
 
-        self.searcher = RandomizedSearchCV(mapper, params, cv = cv, n_iter = tune_iters, refit = False, verbose = verbose)
-        self.searcher.fit(raw_expression, y = latent_compositions)
+        try:
+            self.searcher.fit(np.arange(N))
+        except KeyboardInterrupt:
+            pass
 
-        best_params = self.searcher.best_params_
-        self.set_fit_params(**best_params)
-
-        return best_params
-
-
-    def fit(self,raw_expression, accessibility_matrix = None, 
-        accessibility_latent_compositions = None, bar = True):
-
-        self.add_accessibility_params(accessibility = accessibility_matrix, 
-            latent_compositions = accessibility_latent_compositions)
-        self.add_expression_params(raw_expression)
-
-        logger.debug('Training RP models ...')
-        for model in tqdm.tqdm(self.gene_models, desc = 'Training models', disable = not bar):
-            params = self.get_fit_params()
-            successfully_fit, attempts = False, 1
-            while not successfully_fit:
-                try:
-                    model.fit(**params)
-                    successfully_fit=True
-                except ValueError:
-                    if attempts < 5:
-                        params['learning_rate']/=10
-                        attempts+=1
-                    else:
-                        raise ValueError('Model {} could not be trained!'.format(model.gene))
+        self.best_params = self.searcher.best_params_
+        for k,v in self.best_params.items():
+            self.__dict__[k] = v
 
         return self
 
-    def predict(self,raw_expression, accessibility_matrix = None, accessibility_latent_compositions = None):
+    def _get_param_space(self):
+        if self.use_SGD:
+            return dict(
+                batch_size = [32,64,128,256,512],
+                learning_rate = stats.loguniform(1e-5, 0.01),
+                decay = stats.loguniform(0.9, 1.0),
+                momentum = stats.loguniform(0.5, 0.999),
+            )
+        else:
+            return dict(
+                learning_rate = stats.loguniform(0.0001, 0.1)
+            )
 
-        self.add_accessibility_params(accessibility = accessibility_matrix, 
-            latent_compositions = accessibility_latent_compositions)
-        self.add_expression_params(raw_expression)
+    @register_input
+    def fit(self, bar = True):
+
+        logger.debug('Training RP models ...')
+        for model in tqdm.tqdm(self.gene_models, desc = 'Training models', disable = not bar):
+            model.fit(**self.get_fit_params())
+
+        return self
+
+    @register_input
+    def predict(self):
         
         return np.hstack([
             model.predict() for model in tqdm.tqdm(self.gene_models, desc = 'Predicting expression')
@@ -327,25 +371,24 @@ class CisModeler(FromRegions):
     def get_modeled_genes(self):
         return np.array([m.gene for m in self.gene_models])
 
-    def _get_logp(self,raw_expression, accessibility_matrix = None, accessibility_latent_compositions = None, bar = True):
+    @property
+    def genes(self):
+        return self.get_modeled_genes()
 
-        self.add_accessibility_params(accessibility = accessibility_matrix, 
-            latent_compositions = accessibility_latent_compositions)
-        self.add_expression_params(raw_expression)
 
+    @register_input
+    def get_logp(self, bar = True):
         return np.hstack(list(map(lambda m : m._get_logp(), tqdm.tqdm(self.gene_models, desc = 'Scoring models', disable = not bar))))
 
 
-    def score(self, raw_expression, accessibility_matrix = None, accessibility_latent_compositions = None, bar = True):
-
-        return -self._get_logp(raw_expression, accessibility_matrix = accessibility_matrix, 
-            accessibility_latent_compositions = accessibility_latent_compositions, bar = bar).mean()
+    def score(self, bar = True, **kwargs):
+        return -self.get_logp(**kwargs, bar = bar).mean()
 
 
 class PyroRPVI(PyroModule):
     
     def __init__(self, gene_name, *, region_distances, upstream_mask, downstream_mask, 
-        region_score_map, region_mask, use_cuda = False):
+        region_score_map, region_mask, use_cuda = False, use_trans_features = False, use_SGD = False):
         super().__init__()
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
@@ -366,17 +409,25 @@ class PyroRPVI(PyroModule):
         self.max_prob = torch.tensor([0.99999], requires_grad = False).to(self.device)
         self.clear_features()
 
-        self.posterior_mean = torch.ones((5,))
+        if use_trans_features:
+            self.forward = self.trans_model
+        else:
+            self.forward = self.cis_model
+
+        if use_SGD:
+            self.fit = self.fit_SGD
 
 
     def clear_features(self):
         self.upstream_weights = []
         self.downstream_weights = []
         self.promoter_weights = []
+        self.trans_features = None
+
 
     def add_accessibility_params(self, region_weights):
 
-        region_weights = region_weights[:, self.region_score_map[self.region_mask]] * 1e4
+        region_weights = region_weights[:, self.region_score_map[self.region_mask]]# * 1e4
 
         self.upstream_weights.append(region_weights[:, self.upstream_mask])
         self.downstream_weights.append(region_weights[:, self.downstream_mask])
@@ -404,7 +455,7 @@ class PyroRPVI(PyroModule):
                 softmax_denom = self.softmax_denom.index_select(0, ind).reshape((-1,1)), 
                 dispersion = theta, deterministic=deterministic)
     
-    def forward(self, batch_size = None, idx = None):
+    def cis_model(self, batch_size = None, idx = None):
 
         if idx is None:
             idx = np.arange(len(self.rd_loc))
@@ -412,10 +463,10 @@ class PyroRPVI(PyroModule):
         pyro.module("batchnorm", self.bn)
 
         with pyro.plate(self.gene +"_regions", 3):
-            a = pyro.sample(self.gene +"_a", dist.HalfNormal(12.))
+            a = pyro.sample(self.gene +"_a", dist.HalfNormal(1.))
 
         with pyro.plate(self.gene +"_upstream-downstream", 2):
-            d = torch.exp(pyro.sample(self.gene +'_logdistance', dist.Normal(np.e, 2.)))
+            d = torch.exp(pyro.sample(self.gene +'_logdistance', dist.Normal(np.e, 1.)))
 
         theta = pyro.sample(self.gene +"_theta", dist.Gamma(2., 0.5))
 
@@ -423,15 +474,46 @@ class PyroRPVI(PyroModule):
 
             ind = torch.tensor(idx).index_select(0, ind)
 
-            activation = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
+            f_Z = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
                 + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
                 + a[2] * self.promoter_weights.index_select(0, ind).sum(-1)
 
-            pyro.deterministic('activation', activation)
+            pyro.deterministic('f_Z', f_Z)
 
-            NB = self.get_NB_distribution(activation, ind, theta)
-
+            NB = self.get_NB_distribution(f_Z, ind, theta)
             pyro.sample(self.gene + '_obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
+
+
+    def trans_model(self, batch_size = None, idx = None):
+
+        if idx is None:
+            idx = np.arange(len(self.rd_loc))
+
+        pyro.module("batchnorm", self.bn)
+
+        with pyro.plate(self.gene +"_regions", 3):
+            a = pyro.sample(self.gene +"_a", dist.HalfNormal(1.))
+
+        with pyro.plate(self.gene +"_upstream-downstream", 2):
+            d = torch.exp(pyro.sample(self.gene +'_logdistance', dist.Normal(np.e, 1.)))
+
+        theta = pyro.sample(self.gene +"_theta", dist.Gamma(2., 0.5))
+
+        with pyro.plate(self.gene + '_trans_coefs', self.trans_features.shape[-1]):
+            a_trans = pyro.sample(self.gene + '_a_trans', dist.Normal(0.,1.))
+
+        with pyro.plate(self.gene +"_data", len(idx), subsample_size=batch_size) as ind:
+
+            ind = torch.tensor(idx).index_select(0, ind)
+
+            f_Z = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
+                + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
+                + a[2] * self.promoter_weights.index_select(0, ind).sum(-1) + torch.matmul(self.trans_features.index_select(0, ind), torch.unsqueeze(a_trans, 0).T).reshape(-1)
+            
+            pyro.deterministic('f_Z', f_Z)
+            NB = self.get_NB_distribution(f_Z, ind, theta)
+            pyro.sample(self.gene + '_obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
+
 
     def _fix_features(self):
 
@@ -442,91 +524,112 @@ class PyroRPVI(PyroModule):
             self.promoter_weights = self.to_tensor(np.vstack(self.promoter_weights))
 
     def rail_guide(self):
-        return {self.gene + '_a' : torch.unsqueeze(self.posterior_mean[:3].exp(),0), 
+        return {k : v.reshape((1,-1)) for k, v in self.posterior_mean.items()}
+        '''return {self.gene + '_a' : torch.unsqueeze(self.posterior_mean[:3].exp(),0), 
                 self.gene + '_logdistance' : torch.unsqueeze(self.posterior_mean[3:5], 0), 
-                self.gene + '_theta' : self.posterior_mean[5].exp().reshape((1,1))}
+                self.gene + '_theta' : self.posterior_mean[5].exp().reshape((1,1))}'''
 
-    def predict(self):
+    def sample_posterior(self, *sites, idx = None):
+
+        if idx is None:
+            idx = np.arange(self.get_num_obs())
 
         self._fix_features()
         self.eval()
         
         attempts, success = 0, False
-        
         while not success and attempts < 10:
             try:
                 prediction = Predictive(self, posterior_samples = self.rail_guide(), 
-                    return_sites = ['activation'])(None)['activation']
+                    return_sites = sites)(batch_size = None, idx = idx)
                 success = True
             except ValueError:
                 attempts += 1
                 if attempts > 10:
                     raise ValueError()
 
-        return self.to_numpy(prediction).T
+        return prediction
+
+    def predict(self, idx=None):
+
+        prediction = self.sample_posterior('prediction', idx = idx)['prediction']
+
+        return np.squeeze(self.to_numpy(prediction).T)[:, np.newaxis]
 
     def get_num_obs(self):
         return len(self.rd_loc)
 
-    def _get_logp(self):
+    def _get_logp(self, idx = None):
 
         self._fix_features()
 
-        activation = self.predict()
+        f_Z = self.sample_posterior('f_Z', idx = idx)['f_Z']
         theta = self.rail_guide()[self.gene + '_theta'][0]
-        ind = torch.tensor(np.arange(self.get_num_obs()))
+        if idx is None:
+            idx = torch.tensor(np.arange(len(self)), requires_grad = False)
+        else:
+            idx = torch.tensor(idx, requires_grad = False)
 
-        NB = self.get_NB_distribution(torch.tensor(activation), ind, theta, deterministic=True)
+        NB = self.get_NB_distribution(f_Z, idx, theta, deterministic=True)
 
-        return self.to_numpy(NB.log_prob(self.gene_expr))
+        return self.to_numpy(NB.log_prob(self.gene_expr.index_select(0, idx)))
 
-    def score(self):
-        return -self._get_logp().mean()
+    def score(self, idx = None):
+        return -self._get_logp(idx).mean()
 
     def _get_weights(self):
         pyro.clear_param_store()
         self.bn = torch.nn.BatchNorm1d(1).double()
-        self.guide = AutoDiagonalNormal(self, init_loc_fn = init_to_mean)
+        self.guide = AutoDelta(self, init_loc_fn = init_to_sample)
 
-    def fit(self, learning_rate = 0.001, max_iters = 200,
+    def fit_SGD(self, train_idx = None, test_idx = None, test_size = 0.2, 
+        learning_rate = 0.001, max_iters = 200, batch_size = 64, decay = 0.95, patience = 5, momentum = 0.1, restarts = 5):
+
+        if train_idx is None:
+            train_idx = np.arange(len(self))
+
+        if test_idx is None:
+            test_mask = np.random.rand(len(train_idx)) < test_size
+            test_idx = train_idx[test_mask]
+            train_idx = train_idx[~test_mask]
+            
+        scores, weights, self.test_losses = [],[],[]
+        for restart in range(restarts):
+            try:
+                self._fit_SGD_step(train_idx, test_idx, learning_rate = learning_rate, max_iters = max_iters, batch_size = batch_size, 
+                    decay =decay, patience = patience, momentum = momentum)
+                scores.append(self.testing_loss[-1])
+                weights.append(self._get_save_data())
+                self.test_losses.append(self.testing_loss)
+            except ValueError:
+                learning_rate*=0.5
+                logging.warn('Error training {} model'.format(self.gene))
+
+        if len(scores) == 0:
+            raise ValueError('Model {} could not be fit!'.format(self.gene))
+
+        best_model = np.argmin(scores)
+        self._load_save_data(weights[best_model])
+
+        return self
+
+
+    def _fit_SGD_step(self, train_idx, test_idx, learning_rate = 0.001, max_iters = 200,
         batch_size = 64, decay = 0.95, patience = 5, momentum = 0.1):
         
+        pyro.clear_param_store()
         self._get_weights()
 
-        N = len(self.rd_loc)
+        N = len(self)
         iters_per_epoch = N//batch_size
-        min_iters = 10
+        min_iters = max(5, iters_per_epoch)
 
-        test_set = np.random.rand(N) < 0.2
-        train_set = ~test_set
-        test_set = np.argwhere(test_set)[:,0]
-        train_set = np.argwhere(train_set)[:,0]
-        
         lr_function = partial(_warmup_lr_decay, n_batches_per_epoch = iters_per_epoch, lr_decay = decay)
         scheduler = pyro.optim.LambdaLR({'optimizer': SGD, 'optim_args': {'lr': learning_rate, 'momentum' : momentum}, 
             'lr_lambda' : lambda e : lr_function(e)})
-        #scheduler = pyro.optim.PyroOptim(torch.optim.LBFGS, {'lr' : learning_rate}, {})
+
         svi = SVI(self, self.guide, scheduler, loss=TraceMeanField_ELBO())
         early_stopper = EarlyStopping(patience = patience, tolerance = 1e-4)
-
-        '''class MyModel(nn.Module):
-            def __init__(self, ...):
-                ...
-
-            def model(self, batch):
-                ....
-
-            def guide(self, batch):
-                ...
-
-        model = MyModel(...)
-
-        elbo = pyro.infer.Trace_ELBO()
-        optim = torch.optim.SGD(model.parameters())  # or LBFGS etc
-        for batch in data:
-            optim.zero_grad()
-            elbo.loss_and_grads(model.model, model.guide, batch)
-            optim.step()'''
 
         self._fix_features()
 
@@ -535,29 +638,75 @@ class PyroRPVI(PyroModule):
             running_loss = 0
 
             self.train()
-            running_loss+= float(svi.step(batch_size, idx = train_set))/N
+            running_loss+= float(svi.step(batch_size, idx = train_idx))/len(test_idx)
             scheduler.step()
 
             self.eval()
             self.testing_loss.append(
-                float(svi.evaluate_loss(None, idx = test_set))/test_set.sum()
+                float(svi.evaluate_loss(None, idx = test_idx))/len(test_idx)
             )
 
-            #if j%iters_per_epoch == 0:
-            #    self.training_loss.append(running_loss)
             if j > min_iters and early_stopper.should_stop_training(self.testing_loss[-1]):
                 logger.debug('Stopped training early!')
                 break
 
         self.num_iters_trained = j
-        self.posterior_mean = self.guide.get_posterior().mean
+        self.posterior_mean = self.guide.median()
         return self
+
+    def fit(self, train_idx = None, learning_rate = 0.1, max_iters = 200):
+
+        self.attempts = 0
+        while self.attempts < 5:
+            try:
+                pyro.clear_param_store()
+                self._get_weights()
+                self._fix_features()
+                N = len(self)
+
+                loss_fn = loss_fn = TraceMeanField_ELBO().differentiable_loss
+
+                with poutine.trace(param_only=True) as param_capture:
+                    loss = loss_fn(self.forward, self.guide, batch_size = None, idx = train_idx)
+
+                params = {site["value"].unconstrained() for site in param_capture.trace.nodes.values()}
+                optimizer = torch.optim.LBFGS(params, lr=learning_rate)
+                early_stopper = EarlyStopping(patience = 3, tolerance = 1e-3)
+
+                def closure():
+                    optimizer.zero_grad()
+                    loss = loss_fn(self.forward, self.guide, batch_size = None, idx = train_idx)
+                    loss.backward()
+                    return loss
+
+                self.testing_loss = []
+                for iternum in range(max_iters):
+                    self.testing_loss.append(self.to_numpy(optimizer.step(closure))/len(self))
+
+                    if early_stopper.should_stop_training(self.testing_loss[-1]):
+                        break
+
+                self.posterior_mean = self.guide.median()
+                break
+            except ValueError:
+                learning_rate*=0.5
+                self.attempts+=1
+                if self.attempts >= 5:
+                    raise ModelingError('Model {} could not be fit.'.format(self.gene))
+
+        return self
+
 
     def get_savename(self, prefix):
         return prefix + self.gene + '.pth'
 
     def _get_save_data(self):
         return dict(bn = self.bn.state_dict(), posterior_mean = self.posterior_mean)
+
+    def _load_save_data(self, state):
+        self._get_weights()
+        self.bn.load_state_dict(state['bn'])
+        self.posterior_mean = state['posterior_mean']
 
     def save(self, prefix):
         #torch.save(self.state_dict(), self.get_savename(prefix))
@@ -566,10 +715,7 @@ class PyroRPVI(PyroModule):
     def load(self, prefix):
         #self.load_state_dict(torch.load(self.get_savename(prefix)))
         state = torch.load(self.get_savename(prefix))
-        self.bn = torch.nn.BatchNorm1d(1).double()
-        self.bn.load_state_dict(state['bn'])
-        self.posterior_mean = state['posterior_mean']
-
+        self._load_save_data(state)
 
     def __len__(self):
         return len(self.rd_loc)
@@ -625,10 +771,9 @@ class TransModel(PyroModule, BaseEstimator):
         param_distributions = dict(
             dropout = stats.uniform(0, 0.3),
             seed = stats.randint(1, 2**32-1),
-            learning_rate = stats.loguniform(1e-6, 1e-3),
             batch_size = [32,64,128,256,512],
             decay = stats.loguniform(0.9, 1.0),
-            momentum = stats.loguniform(0.1,0.999),
+            momentum = stats.loguniform(0.5,0.999),
         )
 
         def _score(estimator, X, y):
@@ -636,7 +781,11 @@ class TransModel(PyroModule, BaseEstimator):
 
         self.searcher = RandomizedSearchCV(self, param_distributions, n_iter = tune_iters, 
             verbose = verbose, refit = False, cv = cv, scoring = _score)
-        self.searcher.fit(raw_expression, y = atac_latent_compositions, bar = False)
+
+        try:
+            self.searcher.fit(raw_expression, y = atac_latent_compositions, bar = False)
+        except KeyboardInterrupt:
+            pass
 
         best_params = self.searcher.best_params_
         self.set_params(**best_params)
@@ -660,14 +809,14 @@ class TransModel(PyroModule, BaseEstimator):
         self._set_seeds()
 
         self.beta = torch.nn.Linear(self.accessibility_model.num_topics, 
-            self.expression_model.num_exog_features,
+            self.expression_model.num_endog_features,
             bias = False)
         self.drop = torch.nn.Dropout(self.dropout)
-        self.batchnorm = torch.nn.BatchNorm1d(self.expression_model.num_exog_features)
-        self.guide = AutoDiagonalNormal(self, init_loc_fn = init_to_mean)
+        self.batchnorm = torch.nn.BatchNorm1d(self.expression_model.num_endog_features)
+        self.guide = AutoDiagonalNormal(self, init_loc_fn = init_to_sample)
 
     def get_modeled_genes(self):
-        return self.expression_model.genes
+        return self.expression_model.genes[self.expression_model.highly_variable]
 
     def forward(self, expression, Z, rd_loc, rd_scale, softmax_denom, stochastic_batch = True):
 
@@ -675,7 +824,7 @@ class TransModel(PyroModule, BaseEstimator):
         pyro.module("beta", self.beta)
         pyro.module("dropout", self.drop)
 
-        with pyro.plate('gene_plate', self.expression_model.num_exog_features):
+        with pyro.plate('gene_plate', self.expression_model.num_endog_features):
             theta = pyro.sample("theta", dist.Gamma(2., 0.5))
 
         activation = self.beta(self.drop(Z))
@@ -700,7 +849,7 @@ class TransModel(PyroModule, BaseEstimator):
         raw_expression = self.expression_model._validate_data(raw_expression)
 
         raw_expression = torch.tensor(np.vstack([
-            batch[0] for batch in self.expression_model._get_batches(raw_expression)
+            batch[0][:, self.expression_model.highly_variable] for batch in self.expression_model._get_batches(raw_expression)
         ]), requires_grad = False)
         
         return raw_expression, torch.tensor(atac_latent_compositions), rd_loc, rd_scale, softmax_denom
@@ -770,7 +919,7 @@ class TransModel(PyroModule, BaseEstimator):
         min_epochs = 20
         
         lr_function = partial(_warmup_lr_decay, n_batches_per_epoch = iters_per_epoch, lr_decay = self.decay)
-        scheduler = pyro.optim.LambdaLR({'optimizer': SGD, 'optim_args': {'lr': self.learning_rate, 'momentum' : self.momentum}, 
+        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': self.learning_rate},# 'momentum' : self.momentum}, 
             'lr_lambda' : lambda e : lr_function(e)})
         svi = SVI(self, self.guide, scheduler, loss=TraceMeanField_ELBO())
         early_stopper = EarlyStopping(patience = 5, tolerance = 1e-4)
@@ -792,7 +941,7 @@ class TransModel(PyroModule, BaseEstimator):
         return self
 
 
-    def get_likelihood_difference(self, rp_modeler, raw_expression, accessibility_latent_compositions = None, 
+    def _get_likelihood_difference(self, rp_modeler, raw_expression, accessibility_latent_compositions = None, 
         accessibility_matrix = None):
     
         score_kwargs = dict(raw_expression = raw_expression, 
@@ -800,7 +949,7 @@ class TransModel(PyroModule, BaseEstimator):
                 accessibility_latent_compositions = accessibility_latent_compositions)
 
         cis_genes = rp_modeler.get_modeled_genes()
-        trans_genes = self.expression_model.genes
+        trans_genes = self.get_modeled_genes()
         shared_genes = np.intersect1d(trans_genes, cis_genes)
 
         cis_genes_idx = dict(zip(cis_genes, np.arange(len(cis_genes))))
@@ -816,7 +965,7 @@ class TransModel(PyroModule, BaseEstimator):
         
         return shared_genes, trans_logp, cis_logp
 
-    def likelihood_ratio_test(degrees_of_freedom, shared_genes, trans_logp, cis_logp):
+    def _lrt(degrees_of_freedom, shared_genes, trans_logp, cis_logp):
 
         test_statistic = (trans_logp.sum(0) - cis_logp.sum(0))
         return list(zip(shared_genes, test_statistic, stats.chi2(degrees_of_freedom).cdf(test_statistic)))
