@@ -1,0 +1,9 @@
+
+configfile: 'config.yaml'
+
+rule all:
+    input: config['targets']
+
+include: 'rules/read_signal.rule'
+include: 'rules/general.rule'
+include: 'rules/cis_model.rule'

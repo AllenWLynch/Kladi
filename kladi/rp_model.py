@@ -3,12 +3,13 @@ import torch
 import logging
 import tqdm
 import pyro
-from pyro.nn.module import PyroModule
-from pyro.infer.autoguide import AutoDiagonalNormal, AutoDelta
+from pyro import poutine
+from pyro.nn.module import PyroModule, PyroSample, PyroParam
+from pyro.infer.autoguide import AutoDelta
 import pyro.distributions as dist
-from torch.optim import Adam, SGD
+from torch.optim import SGD
 from pyro.infer import SVI, TraceMeanField_ELBO, Predictive
-from pyro.infer.autoguide.initialization import init_to_sample, init_to_mean
+from pyro.infer.autoguide.initialization import init_to_mean, init_to_mean
 from lisa import FromRegions
 from lisa.core import genome_tools
 from lisa.core.data_interface import DataInterface
@@ -19,13 +20,32 @@ from scipy import sparse, stats
 import re
 from kladi.matrix_models.scipm_base import EarlyStopping
 import glob
-from sklearn.model_selection import ParameterSampler, KFold, RandomizedSearchCV
+from sklearn.model_selection import KFold, RandomizedSearchCV
 from sklearn.base import BaseEstimator
 from functools import partial, wraps
-from pyro import poutine
 import time
+from pyro.contrib.autoname import scope
+from scipy.stats import chi2
+
+import warnings
+warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
+
+def init_to_value(
+    site = None,
+    values = {},
+    *,
+    fallback = init_to_mean,
+):
+    if site is None:
+        return partial(init_to_value, values=values, fallback=fallback)
+
+    if site["name"] in values:
+        return values[site["name"]]
+    if fallback is not None:
+        return fallback(site)
+    raise ValueError(f"No init strategy specified for site {repr(site['name'])}")
 
 class LogMock:
 
@@ -58,18 +78,16 @@ def _get_latent_vars(model, latent_comp = None, matrix = None):
     return latent_compositions.copy()
 
 def get_expression_distribution(f_Z,*, batchnorm, rd_loc, rd_scale, softmax_denom, 
-    dispersion, deterministic = False):
+    dispersion, gamma, bias, deterministic = True):
 
-    #print(f_Z.shape, rd_loc.shape, rd_scale.shape, softmax_denom.shape, dispersion.shape)
     if not deterministic:
         read_depth = torch.distributions.LogNormal(rd_loc, rd_scale).sample()
     else:
         read_depth = rd_loc.exp()
 
     prediction = batchnorm(f_Z)
-    pyro.deterministic('prediction', prediction)
 
-    rate =  prediction.exp()/softmax_denom
+    rate =  (gamma * prediction + bias).exp()/softmax_denom
     mu = read_depth * rate
 
     p = torch.minimum(mu / (mu + dispersion), torch.tensor([0.99999], requires_grad = False))
@@ -79,22 +97,24 @@ def get_expression_distribution(f_Z,*, batchnorm, rd_loc, rd_scale, softmax_deno
 def register_input(func):
 
     @wraps(func)
-    def process_input(self,*args, accessibility_latent_compositions=None, accessibility_matrix=None, expression = None, **kwargs):
+    def process_input(self,*args, accessibility_latent_compositions=None, 
+        accessibility_matrix=None, expression = None, idx = None, **kwargs):
+        
+        if accessibility_latent_compositions is None and accessibility_matrix is None \
+                and expression is None:
+                assert(all([model.has_features() for model in self.gene_models])), 'Must provide features before running an inference function.'
+                return func(self, idx = idx, *args, **kwargs)
+        else:
+            assert(not expression is None)
+            latent_comp = _get_latent_vars(self.accessibility_model, latent_comp = accessibility_latent_compositions,
+                matrix = accessibility_matrix)
 
-        assert(not expression is None)
-        latent_comp = _get_latent_vars(self.accessibility_model, latent_comp = accessibility_latent_compositions,
-            matrix = accessibility_matrix)
+            self.add_accessibility_params(accessibility_matrix, latent_comp)
+            self.add_expression_params(expression)
 
-        self.add_accessibility_params(accessibility_matrix, latent_comp)
-        self.add_expression_params(expression)
-
-        return func(self, *args, **kwargs)
+            return func(self, idx = idx, *args, **kwargs)
     
     return process_input
-
-def knockout_generator(func):
-
-    def 
 
 
 class CisModeler(FromRegions):
@@ -103,7 +123,7 @@ class CisModeler(FromRegions):
 
     def __init__(self, species,*,accessibility_model, expression_model, genes = None,  use_trans_features = False,
         max_iters = 150, learning_rate = 0.1, use_SGD = False, test_size = 0.2, restarts = 5,
-        batch_size = 64, decay = 0.95, momentum = 0.1):
+        batch_size = 64, decay = 0.95, momentum = 0.1, cis_models = None):
 
         assert(species in ['mm10','hg38'])
         regions = accessibility_model.peaks.tolist()
@@ -120,6 +140,8 @@ class CisModeler(FromRegions):
         self.momentum = momentum
         self.test_size = test_size
         self.restarts = restarts
+        self.cis_models = cis_models
+        self.use_trans_features = use_trans_features
 
         self.log = LogMock()
         self.data_interface = DataInterface(species, window_size=100, make_new=False,
@@ -218,14 +240,22 @@ class CisModeler(FromRegions):
 
         region_distances = np.where(np.logical_or(upstream_mask, downstream_mask), region_distances - 1500, region_distances)
 
+        cis_model = None
+        try:
+            cis_model = self.cis_models.get_model(gene_symbol)
+        except (AttributeError, KeyError):
+            pass
+
         return PyroRPVI(gene_symbol, 
+            origin = self.refseq_genes[gene_idx[0]],
             region_distances = region_distances,
             upstream_mask = upstream_mask,
             downstream_mask = downstream_mask,
             region_score_map = self.region_score_map,
             region_mask = region_mask,
             use_trans_features = use_trans_features,
-            use_SGD = self.use_SGD
+            use_SGD = self.use_SGD,
+            parent_model = cis_model,
         )
 
     def add_accessibility_params(self, accessibility, latent_compositions):
@@ -237,13 +267,13 @@ class CisModeler(FromRegions):
         for model in self.gene_models:
             model.clear_features()
 
-        #for imputed_peaks in self.accessibility_model._batch_impute(latent_compositions, bar = False):
-        for start, end in self.accessibility_model._iterate_batch_idx(accessibility.shape[0], 512):
-            batch_peaks = accessibility[start : end]
-            batch_peaks.data = np.ones_like(batch_peaks.data)
-            batch_peaks = np.array(batch_peaks.todense()).astype(float)
+        for imputed_peaks in self.accessibility_model._batch_impute(latent_compositions, bar = False):
+        #for start, end in self.accessibility_model._iterate_batch_idx(accessibility.shape[0], 512):
+        #    batch_peaks = accessibility[start : end]
+        #    batch_peaks.data = np.ones_like(batch_peaks.data)
+        #    batch_peaks = np.array(batch_peaks.todense()).astype(float)
             for model in self.gene_models:
-                model.add_accessibility_params(batch_peaks)
+                model.add_accessibility_params(imputed_peaks * 1e4)
                 
         for model in self.gene_models:
             model.trans_features = model.to_tensor(latent_compositions)
@@ -313,8 +343,18 @@ class CisModeler(FromRegions):
                 self.use_SGD = use_SGD
 
             def fit(self, train_idx):
+                fit = []
                 for model in self.gene_models:
-                    model.fit(train_idx=train_idx, **self.get_fit_params())
+                    try:
+                        model.fit(train_idx=train_idx, **self.get_fit_params())
+                        model.score()
+                        fit.append(True)
+                    except ModelingError:
+                        logging.exception('{} model could not be trained'.format(model.gene))
+                        fit.append(False)
+
+                self.gene_models = [model for was_fit, model in zip(fit, self.gene_models)
+                                    if was_fit]
 
                 return self
 
@@ -353,19 +393,33 @@ class CisModeler(FromRegions):
             )
 
     @register_input
-    def fit(self, bar = True):
+    def load_features(self, idx = None):
+        pass
+
+    @register_input
+    def fit(self, idx = None, bar = True):
 
         logger.debug('Training RP models ...')
+        self.was_fit = []
         for model in tqdm.tqdm(self.gene_models, desc = 'Training models', disable = not bar):
-            model.fit(**self.get_fit_params())
+            try:
+                model.fit(idx = idx, **self.get_fit_params())
+                model.score()
+                self.was_fit.append(True)
+            except (ModelingError, ValueError):
+                logging.exception('{} model could not be trained'.format(model.gene))
+                self.was_fit.append(False)
+
+        #self.gene_models = [model for was_fit, model in zip(fit, self.gene_models)
+        #                    if was_fit]
 
         return self
 
     @register_input
-    def predict(self):
+    def predict(self, idx = None):
         
         return np.hstack([
-            model.predict() for model in tqdm.tqdm(self.gene_models, desc = 'Predicting expression')
+            model.predict(idx = idx) for model in tqdm.tqdm(self.gene_models, desc = 'Predicting expression')
         ])
 
     def get_modeled_genes(self):
@@ -377,18 +431,55 @@ class CisModeler(FromRegions):
 
 
     @register_input
-    def get_logp(self, bar = True):
-        return np.hstack(list(map(lambda m : m._get_logp(), tqdm.tqdm(self.gene_models, desc = 'Scoring models', disable = not bar))))
+    def get_logp(self, idx = None, bar = True):
+        return np.hstack(list(
+            map(lambda m : m._get_logp(idx = idx), 
+            tqdm.tqdm(self.gene_models, desc = 'Scoring models', disable = not bar)))
+            )
 
+    @register_input
+    def score(self, idx = None, bar = True):
+        return -self.get_logp(idx = idx, bar = bar).mean()
 
-    def score(self, bar = True, **kwargs):
-        return -self.get_logp(**kwargs, bar = bar).mean()
+    def cis_trans_test(self, compare_models, pval_threshold = 0.01, idx = None,
+        **feature_kwargs):
+        assert(self.use_trans_features), 'To call cis/trans test, must have trained with "use_trans_features" set to True.'
+        
+        self.load_features(**feature_kwargs)
+        compare_models.load_features(**feature_kwargs)
+
+        dist = chi2(self.accessibility_model.num_topics)
+        critical_val = dist.ppf(1 - pval_threshold)
+
+        results = []
+        for trans_model in self.gene_models:
+            try:
+                cis_model = compare_models.get_model(trans_model.gene)
+                
+                trans_logp = trans_model._get_logp(idx = idx).reshape(-1).sum()
+                cis_logp = cis_model._get_logp(idx = idx).reshape(-1).sum()
+
+                test_stat = 2*(trans_logp - cis_logp)
+
+                results.append(dict(
+                    gene = trans_model.gene,
+                    significant = test_stat > critical_val,
+                    pvalue = 1-dist.cdf(test_stat),
+                    test_statistic = test_stat,
+                    trans_logp = trans_logp,
+                    cis_logp = cis_logp,
+                ))
+            except KeyError:
+                pass
+
+        return sorted(results, key = lambda x : -x['test_statistic'])
 
 
 class PyroRPVI(PyroModule):
     
-    def __init__(self, gene_name, *, region_distances, upstream_mask, downstream_mask, 
-        region_score_map, region_mask, use_cuda = False, use_trans_features = False, use_SGD = False):
+    def __init__(self, gene_name, *, origin, region_distances, upstream_mask, downstream_mask, 
+        region_score_map, region_mask, use_cuda = False, use_trans_features = False, use_SGD = False,
+        parent_model = None):
         super().__init__()
 
         self.use_cuda = torch.cuda.is_available() and use_cuda
@@ -396,12 +487,19 @@ class PyroRPVI(PyroModule):
         self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
         self.to(self.device)
 
+        self.origin = origin
         self.region_score_map = region_score_map
         self.region_mask = region_mask
         self.gene = gene_name
         self.upstream_mask = upstream_mask
         self.downstream_mask = downstream_mask
         self.promoter_mask = ~np.logical_or(self.upstream_mask, self.downstream_mask)
+        
+        if not parent_model is None and use_trans_features:
+            self.guide_params = {k.replace('cis_', 'trans_') : v for
+                k, v in parent_model.guide().items()}
+            self.bn_mean_init = parent_model.bn.running_mean
+            self.bn_var_init = parent_model.bn.running_var
 
         self.upstream_distances = self.to_tensor(region_distances[np.newaxis, self.upstream_mask])
         self.downstream_distances = self.to_tensor(region_distances[np.newaxis, self.downstream_mask])
@@ -413,10 +511,47 @@ class PyroRPVI(PyroModule):
             self.forward = self.trans_model
         else:
             self.forward = self.cis_model
+        #self.forward = self.reg_model
+        self.use_trans_features = use_trans_features
 
         if use_SGD:
             self.fit = self.fit_SGD
 
+    def get_normalized_params(self):
+        model_params = {}
+        for k, v in self.guide().items():
+            v = v.detach()
+            if len(v.size()) > 0:
+                v = list(map(float, np.squeeze(v.numpy())))
+            else:
+                v = float(v)
+            k = k.split('/')[-1].strip(self.gene)
+            model_params[k]=v
+            
+        return model_params
+
+    def get_bounds(self, extend = 5):
+
+        model_params = self.get_normalized_params()
+
+        chrom, start, end, _, strand = self.origin
+        up_decay, down_decay = model_params['logdistance']
+
+        def scale_dist(extend, decay):
+            return int(1500 + extend * 1e3 * decay)
+
+        if strand == '+':
+            return (
+                chrom, 
+                str(int(start) - scale_dist(extend, up_decay)),
+                str(int(end) + scale_dist(extend, down_decay))
+            )
+        else:
+            return (
+                chrom, 
+                str(int(start) - scale_dist(extend, down_decay)),
+                str(int(end) + scale_dist(extend, up_decay))
+            )
 
     def clear_features(self):
         self.upstream_weights = []
@@ -424,6 +559,8 @@ class PyroRPVI(PyroModule):
         self.promoter_weights = []
         self.trans_features = None
 
+    def has_features(self):
+        return len(self.upstream_weights) > 0
 
     def add_accessibility_params(self, region_weights):
 
@@ -446,90 +583,127 @@ class PyroRPVI(PyroModule):
     def RP(self, weights, distances, d):
         return (weights * torch.pow(0.5, distances/(1e3 * d))).sum(-1)
 
-    def get_NB_distribution(self, activation, ind, theta, deterministic = False):
+    def get_NB_distribution(self, activation, ind, theta, 
+        gamma, bias, deterministic = True):
 
         return get_expression_distribution(activation.reshape((-1,1)),
                 batchnorm = self.bn, 
                 rd_loc = self.rd_loc.index_select(0, ind).reshape((-1,1)), 
                 rd_scale = self.rd_scale.index_select(0, ind).reshape((-1,1)), 
                 softmax_denom = self.softmax_denom.index_select(0, ind).reshape((-1,1)), 
-                dispersion = theta, deterministic=deterministic)
+                dispersion = theta, gamma = gamma, bias = bias, 
+                deterministic=deterministic)
+
+    def get_prefix(self):
+        if not self.use_trans_features:
+            return 'cis_' + self.gene
+        else:
+            return 'trans_' + self.gene
     
     def cis_model(self, batch_size = None, idx = None):
 
-        if idx is None:
-            idx = np.arange(len(self.rd_loc))
+        with scope(prefix = self.get_prefix()):
+            if idx is None:
+                idx = np.arange(len(self.rd_loc))
 
-        pyro.module("batchnorm", self.bn)
+            with pyro.plate("regions", 3):
+                a = pyro.sample("a", dist.HalfNormal(1.))
 
-        with pyro.plate(self.gene +"_regions", 3):
-            a = pyro.sample(self.gene +"_a", dist.HalfNormal(1.))
+            with pyro.plate("upstream-downstream", 2):
+                d = pyro.sample('logdistance', dist.LogNormal(np.e, 1.))
 
-        with pyro.plate(self.gene +"_upstream-downstream", 2):
-            d = torch.exp(pyro.sample(self.gene +'_logdistance', dist.Normal(np.e, 1.)))
+            theta = pyro.sample('theta', dist.Gamma(2., 0.5))
+            gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
+            bias = pyro.sample('bias', dist.Normal(0, 5.))
 
-        theta = pyro.sample(self.gene +"_theta", dist.Gamma(2., 0.5))
+            with pyro.plate('data', len(idx), subsample_size=batch_size) as ind:
 
-        with pyro.plate(self.gene +"_data", len(idx), subsample_size=batch_size) as ind:
+                ind = torch.tensor(idx).index_select(0, ind)
 
-            ind = torch.tensor(idx).index_select(0, ind)
-
-            f_Z = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
-                + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
-                + a[2] * self.promoter_weights.index_select(0, ind).sum(-1)
-
-            pyro.deterministic('f_Z', f_Z)
-
-            NB = self.get_NB_distribution(f_Z, ind, theta)
-            pyro.sample(self.gene + '_obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
+                f_Z = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
+                    + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
+                    + a[2] * self.promoter_weights.index_select(0, ind).sum(-1)
+                
+                pyro.deterministic('f_Z', f_Z)
+                NB = self.get_NB_distribution(f_Z, ind, theta, gamma, bias)
+                pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
 
 
     def trans_model(self, batch_size = None, idx = None):
+        
+        with scope(prefix = self.get_prefix()):
+            if idx is None:
+                idx = np.arange(len(self.rd_loc))
 
-        if idx is None:
-            idx = np.arange(len(self.rd_loc))
+            with pyro.plate("regions", 3):
+                a = pyro.sample('a', dist.HalfNormal(1.))
 
-        pyro.module("batchnorm", self.bn)
+            with pyro.plate("upstream-downstream", 2):
+                d = pyro.sample('logdistance', dist.LogNormal(np.e, 1.))
 
-        with pyro.plate(self.gene +"_regions", 3):
-            a = pyro.sample(self.gene +"_a", dist.HalfNormal(1.))
+            theta = pyro.sample('theta', dist.Gamma(2., 0.5))
+            gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
+            bias = pyro.sample('bias', dist.Normal(0, 5.))
 
-        with pyro.plate(self.gene +"_upstream-downstream", 2):
-            d = torch.exp(pyro.sample(self.gene +'_logdistance', dist.Normal(np.e, 1.)))
+            with pyro.plate('trans_coefs', self.trans_features.shape[-1]):
+                a_trans = pyro.sample('a_trans', dist.Normal(0.,1.))
 
-        theta = pyro.sample(self.gene +"_theta", dist.Gamma(2., 0.5))
+            with pyro.plate('data', len(idx), subsample_size=batch_size) as ind:
 
-        with pyro.plate(self.gene + '_trans_coefs', self.trans_features.shape[-1]):
-            a_trans = pyro.sample(self.gene + '_a_trans', dist.Normal(0.,1.))
+                ind = torch.tensor(idx).index_select(0, ind)
 
-        with pyro.plate(self.gene +"_data", len(idx), subsample_size=batch_size) as ind:
+                f_Z = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
+                    + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
+                    + a[2] * self.promoter_weights.index_select(0, ind).sum(-1) + torch.matmul(self.trans_features.index_select(0, ind), torch.unsqueeze(a_trans, 0).T).reshape(-1)
+                
+                pyro.deterministic('f_Z', f_Z)
+                NB = self.get_NB_distribution(f_Z, ind, theta, gamma, bias)
+                pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
 
-            ind = torch.tensor(idx).index_select(0, ind)
 
-            f_Z = a[0] * self.RP(self.upstream_weights.index_select(0, ind), self.upstream_distances, d[0])\
-                + a[1] * self.RP(self.downstream_weights.index_select(0, ind), self.downstream_distances, d[1]) \
-                + a[2] * self.promoter_weights.index_select(0, ind).sum(-1) + torch.matmul(self.trans_features.index_select(0, ind), torch.unsqueeze(a_trans, 0).T).reshape(-1)
-            
-            pyro.deterministic('f_Z', f_Z)
-            NB = self.get_NB_distribution(f_Z, ind, theta)
-            pyro.sample(self.gene + '_obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
+    def reg_model(self, batch_size = None, idx = None):
+
+        with scope(prefix = self.get_prefix()):
+            if idx is None:
+                idx = np.arange(len(self.rd_loc))
+
+            d = 1e3 * pyro.sample('logdistance', dist.LogNormal(3.5, 1.).expand([2]).to_event(1))
+
+            a_up = pyro.sample('a_up', 
+                dist.Normal(0.,torch.pow(0.5, self.upstream_distances/d[0])).to_event(1)).float()
+
+            a_down = pyro.sample('a_down', 
+                dist.Normal(0., torch.pow(0.5, self.downstream_distances/d[1])).to_event(1)).float()
+
+            a_prom = pyro.sample('a_prom', 
+                dist.Normal(0., 1.).expand([self.promoter_weights.shape[-1]]).to_event(1)).float()
+
+            theta = pyro.sample('theta', dist.Gamma(2., 0.5))
+            gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
+            bias = pyro.sample('bias', dist.Normal(0, 5.))
+
+            with pyro.plate('data', len(idx), subsample_size=batch_size) as ind:
+
+                ind = torch.tensor(idx).index_select(0, ind)
+
+                f_Z = torch.matmul(self.upstream_weights.index_select(0, ind), a_up.T).reshape((-1,)) \
+                    + torch.matmul(self.downstream_weights.index_select(0, ind), a_down.T).reshape((-1,)) \
+                    + torch.matmul(self.promoter_weights.index_select(0,ind), a_prom.T).reshape((-1,))
+
+                pyro.deterministic('f_Z', f_Z.double())
+                NB = self.get_NB_distribution(f_Z.double(), ind, theta, gamma, bias)
+
+                pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
 
 
     def _fix_features(self):
 
         if isinstance(self.upstream_weights, list):
-            #make into tensors
             self.upstream_weights = self.to_tensor(np.vstack(self.upstream_weights))
             self.downstream_weights = self.to_tensor(np.vstack(self.downstream_weights))
             self.promoter_weights = self.to_tensor(np.vstack(self.promoter_weights))
 
-    def rail_guide(self):
-        return {k : v.reshape((1,-1)) for k, v in self.posterior_mean.items()}
-        '''return {self.gene + '_a' : torch.unsqueeze(self.posterior_mean[:3].exp(),0), 
-                self.gene + '_logdistance' : torch.unsqueeze(self.posterior_mean[3:5], 0), 
-                self.gene + '_theta' : self.posterior_mean[5].exp().reshape((1,1))}'''
-
-    def sample_posterior(self, *sites, idx = None):
+    def sample_posterior(self, site, idx = None):
 
         if idx is None:
             idx = np.arange(self.get_num_obs())
@@ -537,23 +711,15 @@ class PyroRPVI(PyroModule):
         self._fix_features()
         self.eval()
         
-        attempts, success = 0, False
-        while not success and attempts < 10:
-            try:
-                prediction = Predictive(self, posterior_samples = self.rail_guide(), 
-                    return_sites = sites)(batch_size = None, idx = idx)
-                success = True
-            except ValueError:
-                attempts += 1
-                if attempts > 10:
-                    raise ValueError()
+        guide_trace = poutine.trace(self.guide).get_trace(idx = idx)
+        model_trace = poutine.trace(poutine.replay(self.forward, guide_trace))\
+            .get_trace(idx = idx)
 
-        return prediction
+        return model_trace.nodes[site]['value']
 
     def predict(self, idx=None):
 
-        prediction = self.sample_posterior('prediction', idx = idx)['prediction']
-
+        prediction = self.sample_posterior(self.get_prefix() + '/f_Z', idx = idx)
         return np.squeeze(self.to_numpy(prediction).T)[:, np.newaxis]
 
     def get_num_obs(self):
@@ -563,14 +729,16 @@ class PyroRPVI(PyroModule):
 
         self._fix_features()
 
-        f_Z = self.sample_posterior('f_Z', idx = idx)['f_Z']
-        theta = self.rail_guide()[self.gene + '_theta'][0]
+        f_Z = self.sample_posterior(self.get_prefix() + '/f_Z', idx = idx)
+        theta, gamma, bias = [self.guide()[self.get_prefix() + '/' + param]
+            for param in ['theta','gamma','bias']]
+
         if idx is None:
             idx = torch.tensor(np.arange(len(self)), requires_grad = False)
         else:
             idx = torch.tensor(idx, requires_grad = False)
 
-        NB = self.get_NB_distribution(f_Z, idx, theta, deterministic=True)
+        NB = self.get_NB_distribution(f_Z, idx, theta, gamma, bias, deterministic=True)
 
         return self.to_numpy(NB.log_prob(self.gene_expr.index_select(0, idx)))
 
@@ -579,8 +747,24 @@ class PyroRPVI(PyroModule):
 
     def _get_weights(self):
         pyro.clear_param_store()
-        self.bn = torch.nn.BatchNorm1d(1).double()
-        self.guide = AutoDelta(self, init_loc_fn = init_to_sample)
+        self.bn = torch.nn.BatchNorm1d(1, momentum = 1.0, affine = False).double()
+
+        try:
+            self.guide_params
+            self.guide = AutoDelta(self, 
+                init_loc_fn = init_to_value(
+                    values = {k : v.clone().detach().requires_grad_(True) for k, v in self.guide_params.items()},
+                    fallback=init_to_mean)
+                )
+            self.bn.running_mean = self.bn_mean_init.clone().detach()
+            self.bn.running_var = self.bn_var_init.clone().detach()
+
+        except AttributeError:
+            self.guide = AutoDelta(self, init_loc_fn = init_to_mean)
+
+    @staticmethod
+    def get_loss_fn():
+        return TraceMeanField_ELBO().differentiable_loss
 
     def fit_SGD(self, train_idx = None, test_idx = None, test_size = 0.2, 
         learning_rate = 0.001, max_iters = 200, batch_size = 64, decay = 0.95, patience = 5, momentum = 0.1, restarts = 5):
@@ -612,7 +796,6 @@ class PyroRPVI(PyroModule):
         self._load_save_data(weights[best_model])
 
         return self
-
 
     def _fit_SGD_step(self, train_idx, test_idx, learning_rate = 0.001, max_iters = 200,
         batch_size = 64, decay = 0.95, patience = 5, momentum = 0.1):
@@ -654,20 +837,20 @@ class PyroRPVI(PyroModule):
         self.posterior_mean = self.guide.median()
         return self
 
-    def fit(self, train_idx = None, learning_rate = 0.1, max_iters = 200):
+    def fit(self, idx = None, learning_rate = 0.1, max_iters = 200):
 
         self.attempts = 0
-        while self.attempts < 5:
+        while True:
             try:
                 pyro.clear_param_store()
                 self._get_weights()
                 self._fix_features()
                 N = len(self)
 
-                loss_fn = loss_fn = TraceMeanField_ELBO().differentiable_loss
+                loss_fn = self.get_loss_fn()
 
                 with poutine.trace(param_only=True) as param_capture:
-                    loss = loss_fn(self.forward, self.guide, batch_size = None, idx = train_idx)
+                    loss = loss_fn(self.forward, self.guide, batch_size = None, idx = idx)
 
                 params = {site["value"].unconstrained() for site in param_capture.trace.nodes.values()}
                 optimizer = torch.optim.LBFGS(params, lr=learning_rate)
@@ -675,7 +858,7 @@ class PyroRPVI(PyroModule):
 
                 def closure():
                     optimizer.zero_grad()
-                    loss = loss_fn(self.forward, self.guide, batch_size = None, idx = train_idx)
+                    loss = loss_fn(self.forward, self.guide, batch_size = None, idx = idx)
                     loss.backward()
                     return loss
 
@@ -683,16 +866,19 @@ class PyroRPVI(PyroModule):
                 for iternum in range(max_iters):
                     self.testing_loss.append(self.to_numpy(optimizer.step(closure))/len(self))
 
+                    if iternum > 2 and self.testing_loss[-1] > self.testing_loss[0]:
+                        raise ValueError()
+
                     if early_stopper.should_stop_training(self.testing_loss[-1]):
                         break
 
-                self.posterior_mean = self.guide.median()
-                break
             except ValueError:
                 learning_rate*=0.5
                 self.attempts+=1
-                if self.attempts >= 5:
+                if self.attempts >= 10:
                     raise ModelingError('Model {} could not be fit.'.format(self.gene))
+            else:
+                break
 
         return self
 
@@ -701,12 +887,12 @@ class PyroRPVI(PyroModule):
         return prefix + self.gene + '.pth'
 
     def _get_save_data(self):
-        return dict(bn = self.bn.state_dict(), posterior_mean = self.posterior_mean)
+        return dict(bn = self.bn.state_dict(), guide = self.guide)
 
     def _load_save_data(self, state):
         self._get_weights()
         self.bn.load_state_dict(state['bn'])
-        self.posterior_mean = state['posterior_mean']
+        self.guide = state['guide']
 
     def save(self, prefix):
         #torch.save(self.state_dict(), self.get_savename(prefix))
@@ -744,317 +930,24 @@ class PyroRPVI(PyroModule):
     def to_numpy(X):
         return X.detach().cpu().numpy()
 
-class TransModel(PyroModule, BaseEstimator):
 
-    bn_keys = ['batchnorm.weight', 'batchnorm.bias', 
-        'batchnorm.running_mean', 'batchnorm.running_var', 'batchnorm.num_batches_tracked']
+def posterior_ISD(self, reg_state, motif_hits, qvalue = False):
 
-    def __init__(self,*, accessibility_model, expression_model, dropout = 0.2, learning_rate = 0.1, batch_size = 64, 
-        num_iters = 200, seed = None, decay = 0.95, momentum = 0.9):
-        super().__init__()
-        self.accessibility_model = accessibility_model
-        self.expression_model = expression_model
-        self.learning_rate = learning_rate
-        self.batch_size = batch_size
-        self.num_iters = num_iters
-        self.dropout = dropout
-        self.seed = seed
-        self.decay = decay
-        self.momentum = momentum
+    #assert(motif_hits.shape[1] == reg_state.shape[0])
+    assert(len(reg_state.shape) == 1)
 
-    def tune_hyperparameters(self,raw_expression, accessibility_matrix = None, 
-        accessibility_latent_compositions = None, cv = KFold(5), tune_iters = 50, verbose = 2):
+    reg_state = reg_state[self.region_mask][np.newaxis, :]
 
-        atac_latent_compositions = _get_latent_vars(self.accessibility_model, 
-            latent_comp=accessibility_latent_compositions, matrix=accessibility_matrix)
+    if qvalue:
+        motif_hits = motif_hits[:,self.region_mask]
+        motif_hits.data = 1/np.exp(motif_hits.data)
+        isd_mask = 1 - np.array(motif_hits.todense())
+    else:
+        motif_hits = np.array(motif_hits[:, self.region_mask].todense())
+        isd_mask = np.maximum(1 - motif_hits, 0)
 
-        param_distributions = dict(
-            dropout = stats.uniform(0, 0.3),
-            seed = stats.randint(1, 2**32-1),
-            batch_size = [32,64,128,256,512],
-            decay = stats.loguniform(0.9, 1.0),
-            momentum = stats.loguniform(0.5,0.999),
-        )
+    isd_states = np.vstack((reg_state, reg_state * isd_mask))
 
-        def _score(estimator, X, y):
-            return -estimator.score(X, y)
+    rp_scores = np.exp(self.get_log_expr_rate(isd_states))
 
-        self.searcher = RandomizedSearchCV(self, param_distributions, n_iter = tune_iters, 
-            verbose = verbose, refit = False, cv = cv, scoring = _score)
-
-        try:
-            self.searcher.fit(raw_expression, y = atac_latent_compositions, bar = False)
-        except KeyboardInterrupt:
-            pass
-
-        best_params = self.searcher.best_params_
-        self.set_params(**best_params)
-
-        return best_params
-
-
-    def _set_seeds(self):
-
-        seed = self.seed
-        if seed is None:
-            seed = int(time.time() * 1e7)%(2**32-1)
-
-        torch.manual_seed(seed)
-        pyro.set_rng_seed(seed)
-        np.random.seed(seed)
-
-    def _get_weights(self):
-
-        pyro.clear_param_store()
-        self._set_seeds()
-
-        self.beta = torch.nn.Linear(self.accessibility_model.num_topics, 
-            self.expression_model.num_endog_features,
-            bias = False)
-        self.drop = torch.nn.Dropout(self.dropout)
-        self.batchnorm = torch.nn.BatchNorm1d(self.expression_model.num_endog_features)
-        self.guide = AutoDiagonalNormal(self, init_loc_fn = init_to_sample)
-
-    def get_modeled_genes(self):
-        return self.expression_model.genes[self.expression_model.highly_variable]
-
-    def forward(self, expression, Z, rd_loc, rd_scale, softmax_denom, stochastic_batch = True):
-
-        pyro.module("batchnorm", self.batchnorm)
-        pyro.module("beta", self.beta)
-        pyro.module("dropout", self.drop)
-
-        with pyro.plate('gene_plate', self.expression_model.num_endog_features):
-            theta = pyro.sample("theta", dist.Gamma(2., 0.5))
-
-        activation = self.beta(self.drop(Z))
-
-        pyro.deterministic('activation', activation)
-
-        with pyro.plate('samples_plate', expression.shape[0], subsample_size = self.batch_size if stochastic_batch else None) as ind: 
-
-            NB = get_expression_distribution(f_Z = activation.index_select(0, ind),
-                batchnorm = self.batchnorm, 
-                rd_loc = rd_loc.index_select(0, ind), 
-                rd_scale = rd_scale.index_select(0, ind), 
-                softmax_denom = softmax_denom.index_select(0, ind).reshape((-1,1)),
-                dispersion = theta)
-
-            pyro.sample('obs', NB.to_event(1), obs = expression.index_select(0, ind))
-
-
-    def _featurize(self, raw_expression, atac_latent_compositions):
-        rd_loc, rd_scale, softmax_denom = list(map(lambda x : torch.tensor(x, requires_grad = False), self.expression_model._get_expression_distribution_parameters(raw_expression)))
-
-        raw_expression = self.expression_model._validate_data(raw_expression)
-
-        raw_expression = torch.tensor(np.vstack([
-            batch[0][:, self.expression_model.highly_variable] for batch in self.expression_model._get_batches(raw_expression)
-        ]), requires_grad = False)
-        
-        return raw_expression, torch.tensor(atac_latent_compositions), rd_loc, rd_scale, softmax_denom
-
-    def save(self, filename):
-
-        state_dict = {k : self.state_dict()[k] for k in 
-            self.bn_keys + ['posterior_mean','beta.weight']}
-        torch.save(state_dict, filename)
-
-    def load(self, filename):
-
-        self._get_weights()
-
-        state_dict = torch.load(filename)
-        
-        self.beta.load_state_dict({'weight' : state_dict['beta.weight']})
-        self.posterior_mean = state_dict['posterior_mean']
-        self.batchnorm.load_state_dict({param.split('.')[1] : state_dict[param] for param in self.bn_keys})
-
-
-    def predict(self,raw_expression, accessibility_matrix = None, accessibility_latent_compositions = None):
-        
-        atac_latent_compositions = _get_latent_vars(self.accessibility_model, 
-            latent_comp=accessibility_latent_compositions, matrix=accessibility_matrix)
-
-        expression, Z, rd_loc, rd_scale, softmax_denom = self._featurize(raw_expression, atac_latent_compositions)
-
-        return self.beta(Z).detach().cpu().numpy()
-
-
-    def _get_logp(self,raw_expression, accessibility_matrix = None, 
-        accessibility_latent_compositions = None):
-
-        atac_latent_compositions = _get_latent_vars(self.accessibility_model, 
-            latent_comp=accessibility_latent_compositions, matrix=accessibility_matrix)
-
-        expression, Z, rd_loc, rd_scale, softmax_denom = self._featurize(raw_expression, atac_latent_compositions)
-
-        self.eval()
-
-        NB = get_expression_distribution(f_Z=self.beta(Z), 
-            batchnorm=self.batchnorm, rd_loc=rd_loc, rd_scale = rd_scale, 
-            softmax_denom = softmax_denom.reshape((-1,1)), 
-            dispersion = self.posterior_mean.exp())
-
-        return NB.log_prob(expression).detach().cpu().numpy()
-
-
-    def score(self, raw_expression, accessibility_latent_compositions = None, 
-        accessibility_matrix = None):
-
-        return -self._get_logp(raw_expression = raw_expression, accessibility_matrix = accessibility_matrix, 
-            accessibility_latent_compositions = accessibility_latent_compositions).mean()
-
-    
-    def fit(self, raw_expression, accessibility_latent_compositions = None, 
-        accessibility_matrix = None, bar = True):
-
-        atac_latent_compositions = _get_latent_vars(self.accessibility_model, 
-            latent_comp=accessibility_latent_compositions, matrix=accessibility_matrix)
-        
-        self._get_weights()
-
-        N = len(atac_latent_compositions)
-        iters_per_epoch = N//self.batch_size
-        min_epochs = 20
-        
-        lr_function = partial(_warmup_lr_decay, n_batches_per_epoch = iters_per_epoch, lr_decay = self.decay)
-        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': self.learning_rate},# 'momentum' : self.momentum}, 
-            'lr_lambda' : lambda e : lr_function(e)})
-        svi = SVI(self, self.guide, scheduler, loss=TraceMeanField_ELBO())
-        early_stopper = EarlyStopping(patience = 5, tolerance = 1e-4)
-
-        self.training_loss = []
-        for j in tqdm.tqdm(range(int(self.num_iters)), desc = 'Training model', disable = not bar):
-
-            self.train()
-            self.training_loss.append(float(svi.step(
-                    *self._featurize(raw_expression, atac_latent_compositions))) / (N * self.expression_model.num_exog_features)
-            )       
-            scheduler.step()
-            
-            if j > min_epochs and early_stopper.should_stop_training(self.training_loss[-1]):
-                logger.debug('Stopped training early!')
-                break
-
-        self.posterior_mean = self.guide.get_posterior().mean
-        return self
-
-
-    def _get_likelihood_difference(self, rp_modeler, raw_expression, accessibility_latent_compositions = None, 
-        accessibility_matrix = None):
-    
-        score_kwargs = dict(raw_expression = raw_expression, 
-                accessibility_matrix = accessibility_matrix, 
-                accessibility_latent_compositions = accessibility_latent_compositions)
-
-        cis_genes = rp_modeler.get_modeled_genes()
-        trans_genes = self.get_modeled_genes()
-        shared_genes = np.intersect1d(trans_genes, cis_genes)
-
-        cis_genes_idx = dict(zip(cis_genes, np.arange(len(cis_genes))))
-        trans_genes_idx = dict(zip(trans_genes, np.arange(len(trans_genes))))
-
-        trans_idx, cis_idx = list(zip(*[
-            (trans_genes_idx[gene], cis_genes_idx[gene]) 
-            for gene in shared_genes
-        ]))
-
-        trans_logp = self._get_logp(**score_kwargs)[:, trans_idx]
-        cis_logp = rp_modeler._get_logp(**score_kwargs)[:, cis_idx]
-        
-        return shared_genes, trans_logp, cis_logp
-
-    def _lrt(degrees_of_freedom, shared_genes, trans_logp, cis_logp):
-
-        test_statistic = (trans_logp.sum(0) - cis_logp.sum(0))
-        return list(zip(shared_genes, test_statistic, stats.chi2(degrees_of_freedom).cdf(test_statistic)))
-
-
-'''class RPModelPointEstimator:
-
-    @classmethod
-    def from_file(cls, filename):
-
-        with open(filename, 'rb') as f:
-            state_dict = pickle.load(f)
-
-        gene = state_dict['name']
-        del state_dict['name']
-
-        return cls(gene, **state_dict)
-
-    def __init__(self, gene_symbol, *, a_up, a_down, a_promoter, distance_up, distance_down, b,
-            upstream_mask, downstream_mask, promoter_mask, upstream_distances, downstream_distances,
-            region_mask, region_score_map, theta = theta):
-
-        self.gene = gene_symbol
-        self.a_up = a_up
-        self.a_down = a_down
-        self.a_promoter = a_promoter
-        self.distance_up = distance_up
-        self.distance_down = distance_down
-        self.theta = theta
-
-        self.upstream_mask = upstream_mask
-        self.downstream_mask = downstream_mask
-        self.promoter_mask = promoter_mask
-        self.upstream_distances = upstream_distances
-        self.downstream_distances = downstream_distances
-        self.region_mask = region_mask
-        self.region_score_map = region_score_map
-
-
-    def save(self, filename):
-        with open(filename, 'wb') as f:
-            pickle.dump(self.__dict__, f)
-
-    def predict(self, region_weights):
-
-        region_weights = region_weights[:, self.region_score_map[self.region_mask]] * 1e4
-
-        return self._get_log_expr_rate(
-            upstream_weights=region_weights[:, self.upstream_mask], downstream_weights=region_weights[:, self.downstream_mask],
-            promoter_weights=region_weights[:, self.promoter_mask]
-        )[:, np.newaxis]
-
-    def _get_log_expr_rate(self, *, upstream_weights, downstream_weights, promoter_weights, return_components = False):
-
-        upstream_effects =  self.a_up * np.sum(upstream_weights * np.power(0.5, self.upstream_distances/ (1e3 * np.exp(self.distance_up)) ), axis = 1)
-        downstream_effects = self.a_down * np.sum(downstream_weights * np.power(0.5, self.downstream_distances/ (1e3 * np.exp(self.distance_down))), axis = 1)
-        promoter_effects = self.a_promoter * np.sum(promoter_weights, axis = 1)
-        
-        lam = upstream_effects + promoter_effects + downstream_effects
-
-        if return_components:
-            return lam, upstream_effects, promoter_effects, downstream_effects
-        else:
-            return lam
-
-
-    def posterior_ISD(self, reg_state, motif_hits, qvalue = False):
-
-        #assert(motif_hits.shape[1] == reg_state.shape[0])
-        assert(len(reg_state.shape) == 1)
-
-        reg_state = reg_state[self.region_mask][np.newaxis, :]
-
-        if qvalue:
-            motif_hits = motif_hits[:,self.region_mask]
-            motif_hits.data = 1/np.exp(motif_hits.data)
-            isd_mask = 1 - np.array(motif_hits.todense())
-        else:
-            motif_hits = np.array(motif_hits[:, self.region_mask].todense())
-            isd_mask = np.maximum(1 - motif_hits, 0)
-
-        isd_states = np.vstack((reg_state, reg_state * isd_mask))
-
-        rp_scores = np.exp(self.get_log_expr_rate(isd_states))
-
-        return 1 - rp_scores[1:]/rp_scores[0]
-
-    def __str__(self):
-
-        return '\n'.join(['{}: {}'.format(str(k), str(self.__dict__[k])) 
-                for k in ['distance_up','distance_down','a_up','a_promoter','a_down']
-        ])'''
+    return 1 - rp_scores[1:]/rp_scores[0]

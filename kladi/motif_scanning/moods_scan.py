@@ -44,33 +44,28 @@ def get_motif_glob_str():
 
 def convert_jaspar_to_moods_pfm(jaspar_file):
 
+    from Bio.motifs import read
+
     with open(jaspar_file, 'r') as f:
-        jaspar_matrix = f.readlines()
+        motif = read(f, 'jaspar')
 
-    try:
-        motif_id, factor_name = jaspar_matrix[0].strip('>').strip().split('\t')
-    except ValueError:
-        os.remove(jaspar_file)
+    if not motif.name is None and not motif.matrix_id is None:
+        factor_name = motif.name.upper()
+        motif_id = motif.matrix_id
     else:
-        def strip_extras(jaspar_line):
-            return ' '.join(jaspar_line.split(' ')[3:-1])
-            
-        pfm_matrix = '\n'.join([strip_extras(x) for x in jaspar_matrix[1:]])
+        factor_name, motif_id = os.path.basename(jaspar_file).replace('.jaspar','').replace('/','-')\
+            .upper().split('_')
 
-        os.remove(jaspar_file)
+    new_motif_filename = os.path.join(config.get('data','motifs'), '{}_{}.{}'.format(
+            motif_id, factor_name.replace('(','.').replace(')', ''), config.get('jaspar','pfm_suffix')
+        ).replace('/', '-'))
 
-        new_motif_filename = os.path.join(config.get('data','motifs'), '{}_{}.{}'.format(
-                motif_id, factor_name.replace('(','.').replace(')', ''), config.get('jaspar','pfm_suffix')
-            ).replace('/', '-'))
-        with open( new_motif_filename, 'w') as f:
-            print(pfm_matrix, end = '', file = f)
+    with open(new_motif_filename, 'w') as f:
+        for nuc in ['A','C','G','T']:
+            print(*list(map(int, motif.counts[nuc])), sep = '\t', file = f)
 
-        try:
-            np.loadtxt(new_motif_filename)
-        except ValueError:
-            os.remove(new_motif_filename)
 
-def download_jaspar_motifs():
+def __download_jaspar_motifs__(write_dir):
 
     if not os.path.isdir(config.get('data','root')):
         os.mkdir(config.get('data','root'))
@@ -79,10 +74,10 @@ def download_jaspar_motifs():
 
     if r.ok:
         z = zipfile.ZipFile(io.BytesIO(r.content))
-        z.extractall(config.get('data','motifs'))
+        z.extractall(write_dir)
 
-        for jaspar_pfm in os.listdir(config.get('data','motifs')):
-            convert_jaspar_to_moods_pfm(os.path.join(config.get('data','motifs'), jaspar_pfm))
+        for jaspar_pfm in os.listdir(write_dir):
+            convert_jaspar_to_moods_pfm(os.path.join(write_dir, jaspar_pfm))
         
     else:
         raise Exception('Error downloading motifs database from JASPAR')
@@ -117,7 +112,7 @@ def list_motif_matrices():
     return list(glob(get_motif_glob_str()))
 
 def list_motif_ids():
-    return [os.path.basename(x).strip('.jaspar').split('_') for x in list_motif_matrices()]
+    return [os.path.basename(x).replace('.jaspar', '').split('_') for x in list_motif_matrices()]
 
 
 def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
@@ -134,7 +129,7 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
     process = subprocess.Popen(' '.join(command), stdout=subprocess.PIPE, shell=True, stderr=subprocess.PIPE)
     #process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    motif_matrices = [os.path.basename(x).strip('.{}'.format(config.get('jaspar','pfm_suffix'))) for x in list_motif_matrices()]
+    motif_matrices = [os.path.basename(x) for x in list_motif_matrices()]
     motif_idx_map = dict(zip(motif_matrices, np.arange(len(motif_matrices))))
 
     motif_indices, peak_indices, scores = [],[],[]
@@ -151,7 +146,6 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
 
             peak_num, motif, hit_pos, strand, score, site, snp = line.decode().strip().split(',')
             
-            motif = motif.strip('.{}'.format(config.get('jaspar','pfm_suffix')))
             motif_indices.append(motif_idx_map[motif])
             peak_indices.append(peak_num)
             scores.append(float(score))
@@ -175,12 +169,6 @@ def purge_motif_matrices():
 def get_motif_enrichments(peaks, genome, pvalue_threshold = 0.0001):
 
     peaks = validate_peaks(peaks)
-
-    if len(list_motif_matrices()) == 0:
-        download_jaspar_motifs()
-
-        if len(list_motif_matrices()) == 0:
-            raise Exception('Problem downloading motifs from JASPAR!')
 
     temp_fasta = tempfile.NamedTemporaryFile(delete = False)
     temp_fasta_name = temp_fasta.name

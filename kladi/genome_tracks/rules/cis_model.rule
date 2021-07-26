@@ -1,0 +1,9 @@
+
+rule cis_model_to_bedgraph:
+    input:
+        '{workdir}/{track_id}-cis_model-{source_id}-cis_model.bed'
+    output:
+        '{workdir}/{track_id}-cis_model-{source_id}-cis_model.bedgraph'
+    shell:
+        'sort -k1,1 -k2,2n {input} > {output}'
+    

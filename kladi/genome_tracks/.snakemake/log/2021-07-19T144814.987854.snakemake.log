@@ -1,0 +1,3 @@
+KeyError in line 5 of /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/Snakefile:
+'targets'
+  File "/Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/Snakefile", line 5, in <module>

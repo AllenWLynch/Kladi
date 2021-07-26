@@ -1,0 +1,11 @@
+
+
+rule bedgraph_to_bigwig:
+    input:
+        '{workdir}/{track_id}-{rule_name}-{source_id}-{suffix}.bedgraph'
+    output:
+        '{workdir}/{track_id}-{rule_name}-{source_id}-{suffix}.bigwig'
+    params:
+        genome = lambda w : config[w.track_id]['genome_file']
+    shell:
+        'bedGraphToBigWig {input} {params.genome} {output}'

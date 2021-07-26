@@ -289,7 +289,8 @@ class BaseModel(nn.Module):
 
         def lr_function(e):
             return learning_rates[e]/learning_rates[0]
-        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': learning_rates[0]}, 
+        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 
+            'optim_args': {'lr': learning_rates[0]},#, 'betas' : (0.95, 0.999)}, 
             'lr_lambda' : lr_function})
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
@@ -391,7 +392,7 @@ class BaseModel(nn.Module):
     def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch):
         
         return pyro.optim.lr_scheduler.PyroLRScheduler(OneCycleLR_Wrapper, 
-            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate}, 'max_lr' : max_learning_rate, 
+            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate, 'betas' : (0.90,0.999)}, 'max_lr' : max_learning_rate, 
             'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 'div_factor' : max_learning_rate/min_learning_rate,
             'cycle_momentum' : False, 'three_phase' : False, 'verbose' : False})
 

@@ -1,0 +1,3 @@
+SyntaxError in line 31 of /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/rules/read_signal.rule:
+Colon expected after keyword workdir. (read_signal.rule, line 31)
+  File "/Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/Snakefile", line 8, in <module>

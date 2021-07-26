@@ -51,11 +51,11 @@ def map_colors(ax, c, palette, add_legend = True, hue_order = None, legend_kwarg
 
     else:
         
-        classes = set(c)
+        classes = sorted(set(c))
         num_colors = len(cm.get_cmap(palette).colors)
 
         if num_colors > 24:
-            color_scaler = (num_colors-1)/(num_classes-1)
+            color_scaler = (num_colors-1)/(len(classes)-1)
 
             color_wheel = cm.get_cmap(palette)(
                 (color_scaler * np.arange(len(classes))).astype(int) % num_colors

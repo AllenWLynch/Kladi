@@ -1,60 +1,63 @@
 
-
-config : 'config.yaml'
+rule sort_regions:
+    input:
+        '{workdir}/regions.bed'
+    output:
+        '{workdir}/regions.sorted.bed'
+    shell:
+        'sort -k1,1 -k2,2n {input} > {output}'
 
 rule filter_fragment_regions:
     input: 
-        regions = '{workdir}/regions.bed',
+        regions = rules.sort_regions.output,
         fragment_file = lambda w : config['sources'][w.source_id]
     output:
         '{workdir}/{source_id}-filtered_fragments.bed'
+    message: 'Filtering fragments for relevant regions.'
     shell:
-        'bedtools intersect -a {input.fragment_file} -b {regions} -sorted -wa > {output}'
+        'bedtools intersect -a {input.fragment_file} -b {input.regions} -sorted -wa > {output}'
 
 rule filter_fragment_barcodes:
     input:
-        fragment_file = rule.filter_fragment_regions.output,
-        barcodes = '{workdir}/{track_id}-fragment_signal-barcodes.txt'
+        fragment_file = rules.filter_fragment_regions.output,
+        barcodes = '{workdir}/{track_id}-fragment_coverage-{source_id}-barcodes.txt'
     output:
-        '{workdir}/{track_id}-fragment_signal-{source_id}-barcode_filtered_fragments.bed'
+        '{workdir}/{track_id}-fragment_coverage-{source_id}-barcode_filtered_fragments.bed'
+    params:
+        bin = config['bin']
+    message: 'Filtering cluster {wildcards.track_id} fragments.'
     shell:
-        'python bin/filter_barcodes.py {input.fragment_file} {input.barcodes} > {output}'
+        'python {params.bin}/filter_barcodes.py {input.fragment_file} {input.barcodes} > {output}'
 
-rule count_fragments:
+rule cluster_rd:
     input:
-        rule.filter_fragment_barcodes.output
+        rules.filter_fragment_barcodes.output
     output:
-        '{workdir}/{track_id}-fragment_signal-{source_id}-fragcount.txt'
+        '{workdir}/{track_id}-fragment_coverage-{source_id}-read_counts.txt'
+    message: 'Normalizing cluster coverage depth.'
     shell:
         'wc -l {input} > {output}'
 
-def get_fragment_count(w):
-    with open('{workdir}/{track_id}-fragment_signal-{source_id}-fragcount.txt'.format(
-        workdir = w.workdir, track_id = w.track_id, source_id = w.source_id
-    ), 'r') as f:
-        read_depth = int(f.read().strip())
+def get_coverage_norm(w):
+    #print(w)
+    with open(rules.cluster_rd.output[0].format(workdir = w.workdir, 
+        track_id = w.track_id, source_id = w.source_id), 'r') as f:
+        cov_depth = int(f.read().strip().split(' ')[0])
 
-    return read_depth/config[w.track_id]['norm_constant']
+    scale = config[w.track_id]['norm_constant'] / cov_depth
+    return scale
+
 
 rule fragments_to_bedgraph:
-    input:
-        fragments = rule.filter_fragment_barcodes.output
-        read_depth = rule.count_fragments.output
+    input: 
+        fragments = rules.filter_fragment_barcodes.output,
+        cluster_rd = rules.cluster_rd.output
     output:
-        '{workdir}/{track_id}-fragment_signal-{source_id}-pileup.bedgraph'
+        '{workdir}/{track_id}-fragment_coverage-{source_id}-pileup.bedgraph'
     params:
-        norm = get_fragment_count
+        norm = get_coverage_norm,
         genome = lambda w : config[w.track_id]['genome_file']
+    message: 'Calculating {wildcards.track_id} coverage.'
     shell:
-        'bedtools genomecov -g {params.genome} -i {input} -scale {params.norm} -bga > {output}'
-
-
-rule bedgraph_to_bigwig:
-    input:
-        rule.fragments_to_bedgraph.output
-    output:
-        '{workdir}/{track_id}-fragment_signal-{source_id}-pileup.bigwig'
-    params:
-        genome = lambda w : config[w.track_id]['genome_file']
-    shell:
-        'bedGraphToBigWig {input} {params.genome} {output}'
+        'sort -k1,1 {params.genome} | '
+        'bedtools genomecov -i {input.fragments} -g - -scale {params.norm} -bg > {output}'

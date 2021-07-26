@@ -1,0 +1,5 @@
+Building DAG of jobs...
+MissingInputException in line 3 of /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/rules/read_signal.rule:
+Missing input files for rule filter_fragment_regions:
+/Users/alynch/projects/multiomics/kladi/data/mouse_prostate/workdir/regions.bed
+data/mouse_prostate/fragments.bed

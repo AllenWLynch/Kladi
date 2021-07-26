@@ -399,8 +399,11 @@ class PalantirTrajectoryInference:
 
             threshold = self.adaptive_threshold(self.pseudotime, lineage_probs[self.start_cell], 
                     self.terminal_states[lineage_num], stretch = stretch, shift = shift)
+            
+            lineage_mask = (lineage_probs >= threshold)[:, np.newaxis]
+            lineage_mask[self.terminal_states[lineage_num]] = True
 
-            lineages.append((lineage_probs >= threshold)[:, np.newaxis])
+            lineages.append(lineage_mask)
 
         self.lineages = np.hstack(lineages)
 
@@ -415,7 +418,8 @@ class PalantirTrajectoryInference:
         part_of_lineage1 = lineage2[lineage1]
         time = pseudotime[lineage1]
 
-        lr_model = LogisticRegression(class_weight = 'balanced').fit(time[:,np.newaxis], part_of_lineage1, (1-part_of_lineage1)+(1-earliness_shift))
+        lr_model = LogisticRegression(class_weight = 'balanced')\
+            .fit(time[:,np.newaxis], part_of_lineage1, (1-part_of_lineage1)+(1-earliness_shift))
 
         branch_time = -1*lr_model.intercept_/lr_model.coef_[0][0]
 
@@ -442,12 +446,17 @@ class PalantirTrajectoryInference:
             split_time_matrix = np.full((num_lineages, num_lineages), -1.0)
             for i in range(0,num_lineages-1):
                 for j in range(i+1, num_lineages):
-                    branch_time = min(self._get_lineage_branch_time(lineages[:, i], lineages[:,j], 
+
+                    l1 = lineages[:, i].copy()
+                    l2 = lineages[:, j].copy()
+                    
+                    branch_time = max(self._get_lineage_branch_time(l1, l2, 
                         self.pseudotime, earliness_shift = earliness_shift),
-                        self._get_lineage_branch_time(lineages[:, j], lineages[:,i], 
+                        self._get_lineage_branch_time(l2, l1, 
                             self.pseudotime, earliness_shift = earliness_shift))
 
                     split_time_matrix[i,j] = branch_time
+
 
             latest_split_event = np.where(split_time_matrix == split_time_matrix.max())
             merge1, merge2 = latest_split_event[0][0], latest_split_event[1][0]
@@ -742,14 +751,16 @@ class PalantirTrajectoryInference:
         if ax is None:
             fig, ax = plt.subplots(1,1,figsize=figsize)
 
-        legend_labels = {}
+        legend_labels = []
         for state_idx, (start_node, end_node) in state_nodes.items():
-            legend_labels[state_idx] = str(state_idx) + ': ' + self.lineage_tree.get_node_name(end_node) 
+            legend_labels.append(str(state_idx) + ': ' + self.lineage_tree.get_node_name(end_node))
 
-        sorted_by_multipotency = sorted(list(state_nodes.items()), key = lambda x : len(str(x).split(',')))[::-1]
-        for i, (state, node) in enumerate(sorted_by_multipotency):
+        sorted_by_multipotency = sorted(zip(legend_labels, state_nodes.items()), 
+            key = lambda x : -len(x[0].split(',')))
+
+        for i, (label, (state, node)) in enumerate(sorted_by_multipotency):
             ax.scatter(x = data_representation[cell_states == state,0], y = data_representation[cell_states == state,1], color = cm.get_cmap(palette)(i), 
-                    s = size, label = legend_labels[state])
+                    s = size, label = label)
 
         ax.axis('off')
         ax.legend(loc="center left", title="Possible Terminal States", markerscale = 5, frameon = False, title_fontsize='x-large', fontsize='large',
@@ -874,8 +885,12 @@ class PalantirTrajectoryInference:
 
                 if isinstance(end_node, int):
                     state_time_len = bin_times[-1] - bin_times[0]
-                    if state_time_len < min_pseudotime:
-                        bin_times = bin_times * min_pseudotime/state_time_len
+                    if state_time_len == 0:
+                        bin_times = np.repeat(bin_times, 2)
+                        bin_times[-1] = bin_times[0] + min_pseudotime
+                        bin_means = np.repeat(bin_means, 2, 0)
+                    elif state_time_len < min_pseudotime:
+                        bin_times = bin_times[-1] + (bin_times - bin_times[-1]) * min_pseudotime/state_time_len
                 else:
                     if bin_times[-1] < tree_layout[end_node][1]:
                         bin_times = bin_times * tree_layout[end_node][1]/bin_times[-1]

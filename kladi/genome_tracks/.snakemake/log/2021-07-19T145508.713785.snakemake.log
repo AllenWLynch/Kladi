@@ -1,0 +1,4 @@
+NameError in line 14 of /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/rules/read_signal.rule:
+name 'rule' is not defined
+  File "/Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/Snakefile", line 8, in <module>
+  File "/Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/rules/read_signal.rule", line 14, in <module>

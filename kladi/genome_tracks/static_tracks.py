@@ -1,7 +1,7 @@
 from kladi.genome_tracks.core import BaseTrack
 from pygenometracks import tracks as pgt_tracks
 
-def _constructor(self,*,track_id, file, **properties):
+def _constructor(self,*,track_id, file = None, **properties):
     BaseTrack.__init__(self, track_id, file, visualization_properties = properties)
 
 static_tracks = {}

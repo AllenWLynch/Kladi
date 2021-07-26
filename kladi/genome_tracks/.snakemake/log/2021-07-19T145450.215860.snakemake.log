@@ -1,0 +1,3 @@
+SyntaxError in line 39 of /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/rules/read_signal.rule:
+invalid syntax
+  File "/Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/Snakefile", line 8, in <module>
