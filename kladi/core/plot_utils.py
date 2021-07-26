@@ -10,6 +10,8 @@ import networkx as nx
 from collections import Counter
 from math import ceil
 
+RAW_UMAP = dict(frameon=False, outline_color=('lightgrey','white'), add_outline = True, color_map = 'Greys', layer = 'norm')
+IMPUTED_UMAP = dict(frameon=False, color_map = 'magma', layer = 'imputed')
 
 def map_plot(func, *data, plots_per_row = 3, height =4, aspect = 1.5):
 
