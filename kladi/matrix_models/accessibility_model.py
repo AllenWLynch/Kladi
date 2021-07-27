@@ -21,6 +21,7 @@ import re
 from kladi.core.plot_utils import plot_factor_influence
 import matplotlib.pyplot as plt
 from kladi.matrix_models.scipm_base import Decoder
+from pyro.contrib.autoname import scope
 
 class ZeroPaddedBinaryMultinomial(pyro.distributions.Multinomial):
     
@@ -104,7 +105,7 @@ class AccessibilityModel(BaseModel):
 
         super().__init__(DANEncoder, Decoder, **kwargs)
             
-
+    @scope(prefix='atac')
     def model(self, endog_peaks, exog_peaks, read_depth):
 
         pyro.module("decoder", self.decoder)
@@ -135,6 +136,7 @@ class AccessibilityModel(BaseModel):
         
         return peak_probs
 
+    @scope(prefix = 'atac')
     def guide(self, endog_peaks, exog_peaks, read_depth):
 
         pyro.module("encoder", self.encoder)
@@ -406,10 +408,18 @@ class AccessibilityModel(BaseModel):
                 knockout_states[del_i, del_j] = 0
 
                 isd_states = np.vstack([reg_state, knockout_states])
+                num_states = len(isd_states)
+                ones = np.ones((num_states, 1))
 
                 rp_scores = []
                 for model in gene_models:
-                    rp_scores.append(np.exp(model.predict(isd_states)))
+
+                    model.add_accessibility_params(isd_states)
+                    model.add_expression_params(ones, np.log(ones * 1000), ones, ones * 1000)
+                    
+                    rp_scores.append(
+                        np.squeeze(model.to_numpy(model.sample_posterior(model.get_prefix() + '/independent_rate')).T)[:, np.newaxis]
+                    )
                     bar.update(1)
 
                 rp_scores = np.hstack(rp_scores)

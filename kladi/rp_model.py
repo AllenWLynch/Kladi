@@ -86,8 +86,12 @@ def get_expression_distribution(f_Z,*, batchnorm, rd_loc, rd_scale, softmax_deno
         read_depth = rd_loc.exp()
 
     prediction = batchnorm(f_Z)
+    
+    independent_rate = (gamma * prediction + bias).exp()
+    pyro.deterministic('independent_rate', independent_rate)
 
-    rate =  (gamma * prediction + bias).exp()/softmax_denom
+    rate =  independent_rate/softmax_denom
+
     mu = read_depth * rate
 
     p = torch.minimum(mu / (mu + dispersion), torch.tensor([0.99999], requires_grad = False))
@@ -905,49 +909,7 @@ class PyroRPVI(PyroModule):
 
     def __len__(self):
         return len(self.rd_loc)
-
-
-    '''def get_MAP_estimator(self):
-        
-        params = {k : self.to_numpy(v) for k, v in self.state_dict()}
-        guide_locs = params['guide.loc']
-
-        return RPModelPointEstimator(
-            self.gene,
-            a_up = guide_locs[0], a_down = guide_locs[1], a_promoter = guide_locs[2],
-            distance_up = guide_locs[3], distance_down = guide_locs[4],
-            theta = guide_locs[5],
-            upstream_mask = self.upstream_mask,
-            downstream_mask = self.downstream_mask,
-            promoter_mask  = self.promoter_mask,
-            region_mask = self.region_mask, 
-            region_score_map = self.region_score_map,
-            upstream_distances = self.to_numpy(self.upstream_distances),
-            downstream_distances = self.to_numpy(self.downstream_distances),
-        )'''
     
     @staticmethod
     def to_numpy(X):
         return X.detach().cpu().numpy()
-
-
-def posterior_ISD(self, reg_state, motif_hits, qvalue = False):
-
-    #assert(motif_hits.shape[1] == reg_state.shape[0])
-    assert(len(reg_state.shape) == 1)
-
-    reg_state = reg_state[self.region_mask][np.newaxis, :]
-
-    if qvalue:
-        motif_hits = motif_hits[:,self.region_mask]
-        motif_hits.data = 1/np.exp(motif_hits.data)
-        isd_mask = 1 - np.array(motif_hits.todense())
-    else:
-        motif_hits = np.array(motif_hits[:, self.region_mask].todense())
-        isd_mask = np.maximum(1 - motif_hits, 0)
-
-    isd_states = np.vstack((reg_state, reg_state * isd_mask))
-
-    rp_scores = np.exp(self.get_log_expr_rate(isd_states))
-
-    return 1 - rp_scores[1:]/rp_scores[0]

@@ -22,7 +22,7 @@ from math import ceil
 from kladi.core.plot_utils import map_plot
 from functools import partial
 from kladi.matrix_models.scipm_base import Decoder
-
+from pyro.contrib.autoname import scope
 
 config = configparser.ConfigParser()
 config.read('kladi/matrix_models/config.ini')
@@ -159,6 +159,7 @@ class ExpressionModel(BaseModel):
         
         super().__init__(ExpressionEncoder, Decoder, **kwargs)
 
+    @scope(prefix= 'rna')
     def model(self, raw_expr, encoded_expr, read_depth):
 
         pyro.module("decoder", self.decoder)
@@ -191,7 +192,7 @@ class ExpressionModel(BaseModel):
 
             pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = raw_expr)
 
-
+    @scope(prefix= 'rna')
     def guide(self, raw_expr, encoded_expr, read_depth):
 
         pyro.module("encoder", self.encoder)

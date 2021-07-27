@@ -16,6 +16,7 @@ import logging
 from kladi.matrix_models.ilr import ilr
 from math import ceil
 import time
+from pyro.contrib.autoname import scope
 
 logger = logging.getLogger(__name__)
 
@@ -427,12 +428,14 @@ class BaseModel(nn.Module):
                 self.train()
                 running_loss = 0.0
                 for batch in self._get_batches(X, batch_size = batch_size):
-                    try:
-                        running_loss += float(self.svi.step(*batch))
-                    except ValueError:
-                        raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
+                    
+                    if batch[0].shape[0] > 1:
+                        try:
+                            running_loss += float(self.svi.step(*batch))
+                        except ValueError:
+                            raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
 
-                    scheduler.step()
+                        scheduler.step()
                 
                 #epoch cleanup
                 epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
