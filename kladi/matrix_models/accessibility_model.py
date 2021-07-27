@@ -48,7 +48,7 @@ class DANEncoder(nn.Module):
         self.embedding = nn.Embedding(num_peaks + 1, hidden, padding_idx=0)
         self.num_topics = num_topics
         self.fc_layers = get_fc_stack(
-            layer_dims = [hidden + 1, *[hidden]*(num_layers-2), 2*num_topics],
+            layer_dims = [hidden + 1, *[hidden]*(num_layers-1), 2*num_topics],
             dropout = dropout, skip_nonlin = True
         )
 

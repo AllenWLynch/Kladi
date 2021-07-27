@@ -90,7 +90,7 @@ class ExpressionEncoder(nn.Module):
 
         self.num_topics = num_topics
         self.fc_layers = get_fc_stack(
-            layer_dims = [num_genes + 1, *[hidden]*(num_layers-2), output_batchnorm_size],
+            layer_dims = [num_genes + 1, *[hidden]*(num_layers-1), output_batchnorm_size],
             dropout = dropout, skip_nonlin = True
         )
         
