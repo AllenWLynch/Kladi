@@ -120,8 +120,8 @@ class CovISD:
         expression_genes_map = dict(zip(self.expression_model.genes, range(len(self.expression_model.genes))))
         #if the gene_model's gene is in the scIPM expression model, advance the RP model and record the idx of the gene
         #in the scIPM model
-        rp_gene_to_expr_map, gene_models = list(zip(*[(expression_genes_map[gene_model.name], gene_model) 
-            for gene_model in gene_models if gene_model.name in expression_genes_map]))
+        rp_gene_to_expr_map, gene_models = list(zip(*[(expression_genes_map[gene_model.gene], gene_model) 
+            for gene_model in gene_models if gene_model.gene in expression_genes_map]))
         rp_gene_to_expr_map = np.array(rp_gene_to_expr_map)
         logging.info('Matched {} RP models with expression data.'.format(str(len(rp_gene_to_expr_map))))
         #get ISD
@@ -147,12 +147,13 @@ class CovISD:
                 predicted_expression[:, rp_gene_to_expr_map], 
                 predicted_expression[:, factor_gene_idx_map])
         
-        self.gene_names = np.array([model.name for model in gene_models])
+        self.gene_names = np.array([model.gene for model in gene_models])
         self.successful_isds = successful_isds
         self.factor_names = factor_names
         self.state_meta = state_meta
         self.tf_gene_cov_score = cov_score
         self.ISD_cube = ISD_scores
+        self.state_expr = predicted_expression[:, rp_gene_to_expr_map]
         
         return self
 

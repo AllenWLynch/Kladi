@@ -413,7 +413,8 @@ class AccessibilityModel(BaseModel):
 
                 rp_scores = []
                 for model in gene_models:
-
+                    
+                    model.clear_features()
                     model.add_accessibility_params(isd_states)
                     model.add_expression_params(ones, np.log(ones * 1000), ones, ones * 1000)
                     
@@ -423,7 +424,6 @@ class AccessibilityModel(BaseModel):
                     bar.update(1)
 
                 rp_scores = np.hstack(rp_scores)
-                #num_knockouts + 1, num_genes
                 rp_scores = 1 - rp_scores[1:]/rp_scores[0]
                 state_knockout_scores.append(rp_scores.T[:,:, np.newaxis])
 

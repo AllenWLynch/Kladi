@@ -25,9 +25,12 @@ class ExpressionTrainer(BaseEstimator):
     tolerance = 1e-4
 
     @classmethod
-    def load(cls, filename):
+    def load(cls, filename, **kwargs):
 
         save_dict = torch.load(filename)
+
+        for k, v in kwargs.items():
+            save_dict['params'][k] = v
 
         est = cls()
         est.set_params(**save_dict['params'])
