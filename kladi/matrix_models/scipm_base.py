@@ -1,8 +1,10 @@
 
 
 from functools import partial
+from home.allen.projects.liulab.multiomics.kladi.Kladi.kladi.matrix_models.expression_model import GeneDevianceModel
 import pyro
 import pyro.distributions as dist
+from six import create_bound_method
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,6 +19,7 @@ from kladi.matrix_models.ilr import ilr
 from math import ceil
 import time
 from pyro.contrib.autoname import scope
+import anndata
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +55,15 @@ class EarlyStopping:
 
 class Decoder(nn.Module):
     # Base class for the decoder net, used in the model
-    def __init__(self, num_genes, num_topics, dropout):
+    def __init__(self,*,num_genes, num_topics, num_covariates, dropout):
         super().__init__()
-        self.beta = nn.Linear(num_topics, num_genes, bias = False)
+        self.beta = nn.Linear(num_topics + num_covariates, num_genes, bias = False)
         self.bn = nn.BatchNorm1d(num_genes)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, inputs):
+    def forward(self, topics, covariates):
+
+        inputs = torch.cat([topics, covariates])
         inputs = self.drop(inputs)
         # the output is σ(βθ)
         return F.softmax(self.bn(self.beta(inputs)), dim=1)
@@ -89,58 +94,178 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
         for i, (input_dim, output_dim) in enumerate(zip(layer_dims[:-1], layer_dims[1:]))
     ])
 
+
+def initialize_weights(func):
+
+    def init_weights(self, adata, *args, **kwargs):
+
+        parsed_data = self._parse_adata(adata)
+
+        self.num_exog_featues = parsed_data['decoder_counds'].shape[-1]
+        self.num_endog_features = parsed_data['encoder_counts'].shape[-1]
+        self.num_covariates = parsed_data['covariates'].shape[-1]
+        self.num_extra_features = parsed_data['extra_features'].shape[-1]
+
+        self._get_weights(parsed_data)
+
+        return func(self, parsed_data, *args, **kwargs)
+
+    return init_weights
+
+
+def extract_features(func):
+
+    def extract(self, adata, *args, **kwargs):
+
+        parsed_data = self._parse_adata(adata)
+        self._validate_data(parsed_data)
+
+        return func(self, parsed_data, *args, **kwargs)
+
+    return extract
+
+
 class BaseModel(nn.Module):
 
     I = 50
 
     def __init__(self, encoder_model, decoder_model,*,
             num_modules,
-            num_exog_features,
+            predict_expression,
             highly_variable,
             hidden,
             num_layers,
             decoder_dropout,
             encoder_dropout,
             use_cuda,
-            seed, **encoder_kwargs):
+            covariates,
+            extra_features,
+            seed):
         super().__init__()
 
-        self._set_seeds(seed)
+        self.predict_expression = predict_expression
+        self.highly_variable = highly_variable
+        self.hidden = hidden
+        self.num_layers = num_layers
+        self.decoder_dropout = decoder_dropout
+        self.encoder_dropout = encoder_dropout
+        self.use_cuda = use_cuda
+        self.covariates = covariates
+        self.extra_features = extra_features
+        self.seed = seed
+        self.num_topics = num_modules
+        self.training_bar = True
+
+        self.decoder_model = decoder_model
+        self.encoder_model = encoder_model
+
+
+    def _get_weights(self, parsed_data):
+
+        self._set_seeds(self.seed)
         pyro.clear_param_store()
         torch.cuda.empty_cache()
 
-        assert(isinstance(use_cuda, bool))
-        assert(isinstance(num_modules, int) and num_modules > 0)
+        assert(isinstance(self.use_cuda, bool))
 
-        self.num_topics = num_modules
-
-        if highly_variable is None:
-            highly_variable = np.ones(num_exog_features).astype(bool)
-        else:
-            assert(isinstance(highly_variable, np.ndarray))
-            assert(highly_variable.dtype == bool)
-            
-            highly_variable = np.ravel(highly_variable)
-            assert(len(highly_variable) == num_exog_features)
-
-        self.highly_variable = highly_variable
-        self.num_endog_features = int(highly_variable.sum())
-        self.num_exog_features = num_exog_features
-
-        self.use_cuda = torch.cuda.is_available() and use_cuda
+        use_cuda = torch.cuda.is_available() and self.use_cuda
         if not use_cuda:
             logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
 
-        self.decoder = decoder_model(self.num_exog_features, num_modules, decoder_dropout)
-        self.encoder = encoder_model(self.num_endog_features, num_modules, 
-            hidden, encoder_dropout, num_layers, **encoder_kwargs)
-            
-        self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
+        self.decoder = self.decoder_model(self.num_exog_features, self.num_modules, self.decoder_dropout)
+        self.encoder = self.encoder_model(self.num_endog_features, self.num_modules, 
+            self.hidden, self.encoder_dropout, self.num_layers)
+
+        self.device = torch.device('cuda:0' if use_cuda else 'cpu')
         self.max_prob = torch.tensor([0.99999], requires_grad = False)
         self.K = torch.tensor(self.num_topics, requires_grad = False)
         self.set_device(self.device)
-        self.training_bar = True
 
+
+    def _get_batches(self, parsed_data, 
+        batch_size = 32, bar = True, desc = None, **kwargs):
+
+        for batch_start, batch_end in self._iterate_batch_idx(parsed_data['encoder_counts'].shape[0], batch_size):
+
+            yield self._featurize_counts(parsed_data['encoder_counts'][batch_start : batch_end]), \
+                  self._featurize_dense(parsed_data['extra_features'][batch_start : batch_end]), \
+                  self._featurize_dense(parsed_data['covariates'][batch_start : batch_end]), \
+                  self._make_targets(parsed_data['decoder_counts'][batch_start : batch_end]), \
+                  self._to_tensor(np.array(parsed_data['decoder_counts'][batch_start : batch_end].sum(-1)).reshape((-1,1)))
+
+
+    def _parse_adata(self, adata):
+
+        if not self.predict_expression is None:
+            exog_features = adata.var[self.predict_expression].values
+            assert(exog_features.dtype == bool)
+
+        if not self.highly_variable is None:
+            endog_features = adata.var[self.highly_variable].values
+            assert(endog_features.dtype == bool)
+
+        if not np.all(exog_features[endog_features]):
+            logging.warn('The "highly_variable" set of genes contains genes that will not be predicted. If not intentional, ensure that "highly_variable" is a subset of "predict_expression"')
+
+        if self.layer is None:
+            counts = adata.X
+        else:
+            counts = adata.layers[self.layer]
+
+
+        counts = self._validate_counts(counts)
+
+        if not self.covariates is None and len(self.covariates) > 0:
+            covars = np.hstack([self._validate_covariate(adata.obs[covar].values) 
+                        for covar in self.covariates])
+        else:
+            covars = []
+        
+
+        if not self.extra_features is None and len(self.extra_features) > 0:
+            extra_features = np.hstack([self._validate_feature(adata.obs[feature].values)
+                            for feature in self.extra_features])
+        else:
+            extra_features = []
+
+
+        return dict(
+            encoder_counts = counts[:, endog_features],
+            extra_features = extra_features,
+            decoder_counts = counts[:, exog_features],
+            covariates = covars,
+        )
+
+
+    def _validate_covariate(self, X):
+        pass
+
+    def _validate_feature(self, X):
+        pass
+
+    def _validate_counts(self, X):
+        pass
+
+    def _featurize_counts(self, X):
+        raise NotImplementedError()
+
+    def _featurize_dense(self, X):
+        return self._to_tensor(X)
+
+    def _make_targets(self, X):
+        raise NotImplementedError()
+
+
+    def _validate_data(self, parsed_data):
+        
+        for key, expected_shape in zip(
+            ['encoder_counts','extra_features','covariates','decoder_counts'],
+            [self.num_endog_features, self.num_extra_features, self.num_covariates, self.num_exog_featues]
+        ):
+            assert(parsed_data[key].shape[-1] == expected_shape), '{} is wrong shape. Expected {} features, got {}'\
+                    .format(key, str(expected_shape), str(parsed_data[key].shape[-1]))
+
+    
     @staticmethod
     def _get_gamma_parameters(I, K):
         return 2., 2*K/I
@@ -180,8 +305,6 @@ class BaseModel(nn.Module):
     def _clr(Z):
         return np.log(Z)/np.log(Z).mean(-1, keepdims = True)
 
-    def _get_batches(self, *args, batch_size = 32, bar = True, desc = None, **kwargs):
-        raise NotImplementedError()
 
     def _check_latent_vars(self, latent_compositions):
         
@@ -190,9 +313,9 @@ class BaseModel(nn.Module):
         assert(latent_compositions.shape[1] == self.num_topics)
         assert(np.isclose(latent_compositions.sum(-1), 1).all())
 
+
+    @extract_features
     def _get_logp(self, X, batch_size = 32):
-        
-        X = self._validate_data(X)
 
         batch_loss = []
         for batch in self._get_batches(X, batch_size = batch_size, bar = False):
@@ -245,9 +368,9 @@ class BaseModel(nn.Module):
     def _get_latent_MAP(self, *data):
         raise NotImplementedError()
 
+    @extract_features
     def predict(self, X, batch_size = 256):
 
-        X = self._validate_data(X)
         assert(isinstance(batch_size, int) and batch_size > 0)
         
         self.eval()
@@ -279,6 +402,8 @@ class BaseModel(nn.Module):
         pyro.set_rng_seed(seed)
         np.random.seed(seed)
 
+
+    @initialize_weights
     def _get_learning_rate_bounds(self, X, num_epochs = 6, eval_every = 10, 
         min_learning_rate = 1e-6, max_learning_rate = 1, batch_size = 32):
     
@@ -318,78 +443,6 @@ class BaseModel(nn.Module):
         return np.array(learning_rates[:len(learning_rate_losses)]), np.array(learning_rate_losses)
 
 
-    def _estimate_num_epochs(self,*, X, test_X, test_learning_rate, batch_size = 32, max_epochs = 200,
-        tolerance = 1e-4, patience = 3):
-
-        X = self._validate_data(X)
-
-        test_lr = test_learning_rate
-
-        optimizer = pyro.optim.Adam(dict(lr = test_lr))
-        self.svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
-        self.epoch_loss = []
-        early_stopper = EarlyStopping(tolerance=tolerance, patience=patience)
-        self.num_epochs_trained = 0
-
-        t = trange(max_epochs, desc = 'Epoch 0', leave = True)
-        for epoch in t:
-            #train step
-            self.train()
-            for batch in self._get_batches(X, batch_size = batch_size):
-                self.svi.step(*batch)
-
-            self.epoch_loss.append(self.score(test_X))
-            self.num_epochs_trained+=1
-
-            t.set_description("Epoch {} done. Recent losses: {}".format(
-                        str(epoch + 1),
-                        ' --> '.join('{:.3e}'.format(loss) for loss in self.epoch_loss[-5:])
-                    ))
-
-            if early_stopper.should_stop_training(self.epoch_loss[-1]):
-                logger.info('Stopped training early!')
-                break
-            
-        return self.num_epochs_trained
-
-
-    @staticmethod
-    def _get_decay_rate(a1, a0, periods):
-        return np.exp(
-            np.log(a1/a0)/periods
-        )
-
-    def _get_exp_range_scheduler(self,*,min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch, decay = None,
-        epochs_per_cycle = None):
-
-        if epochs_per_cycle is None:
-            epochs_per_cycle = 4
-
-        if decay is None:
-            #decay such that max_lr == min_lr after num_epochs iterations
-            decay = self._get_decay_rate(min_learning_rate, max_learning_rate, 2*num_epochs/epochs_per_cycle)
-
-        return pyro.optim.CyclicLR({
-                'optimizer' : Adam,
-                'optim_args' : {'lr' : min_learning_rate},
-                'base_lr' : min_learning_rate, 'max_lr' : max_learning_rate, 'step_size_up' : int(epochs_per_cycle/2 * n_batches_per_epoch), 
-                'mode' : 'exp_range', 'gamma' : decay, 'cycle_momentum' : False,
-            })
-
-    @staticmethod
-    def _warmup_lr_decay(step,*,n_batches_per_epoch, lr_decay):
-        return min(1., step/n_batches_per_epoch)*(lr_decay**int(step/n_batches_per_epoch))
-
-
-    def _get_multiplicative_decay_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch):
-        
-        decay = self._get_decay_rate(min_learning_rate, max_learning_rate, num_epochs/2)
-
-        lr_function = partial(self._warmup_lr_decay, n_batches_per_epoch = n_batches_per_epoch, lr_decay = decay)
-        return pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': max_learning_rate}, 
-            'lr_lambda' : lambda e : lr_function(e)})
-
-
     def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch):
         
         return pyro.optim.lr_scheduler.PyroLRScheduler(OneCycleLR_Wrapper, 
@@ -397,9 +450,9 @@ class BaseModel(nn.Module):
             'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 'div_factor' : max_learning_rate/min_learning_rate,
             'cycle_momentum' : False, 'three_phase' : False, 'verbose' : False})
 
-    def get_coherence(self, module_num, counts):
-        pass
 
+    
+    @initialize_weights
     def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32):
 
         assert(isinstance(num_epochs, int) and num_epochs > 0)
@@ -410,7 +463,7 @@ class BaseModel(nn.Module):
         else:
             assert(isinstance(max_learning_rate, float) and max_learning_rate > 0)
         
-        X = self._validate_data(X)
+
         n_observations = X.shape[0]
         n_batches = self.get_num_batches(n_observations, batch_size)
 
@@ -438,7 +491,7 @@ class BaseModel(nn.Module):
                         scheduler.step()
                 
                 #epoch cleanup
-                epoch_loss = running_loss/(X.shape[0] * self.num_exog_features)
+                epoch_loss = running_loss/(n_observations * self.num_exog_features)
                 self.training_loss.append(epoch_loss)
                 recent_losses = self.training_loss[-5:]
 
@@ -454,6 +507,44 @@ class BaseModel(nn.Module):
         self.set_device('cpu')
         self.eval()
         return self
+
+    def score(self, X):
+        self.eval()
+        logp = self._get_logp(X)
+        logp/=(logp.shape[0] * self.num_exog_features)
+        
+        return logp
+
+    def _to_tensor(self, val):
+        return torch.tensor(val).to(self.device)
+
+    def _get_save_data(self):
+        return dict(weights = self.state_dict())
+
+    def _load_save_data(self, data):
+        self.load_state_dict(data['weights'])
+        self.eval()
+        self.to_cpu()
+        return self
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def options_fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, test_X=None,
         policy = '1cycleLR', triangle_decay = None, epochs_per_cycle = None, patience = 3, tolerance = 1e-4):
@@ -541,19 +632,75 @@ class BaseModel(nn.Module):
         self.set_device('cpu')
         self.eval()
         return self
-                
-    def score(self, X):
-        self.eval()
-        return self._get_logp(X)/(X.shape[0] * self.num_exog_features)
 
-    def _to_tensor(self, val):
-        return torch.tensor(val).to(self.device)
+    @initialize_weights
+    def _estimate_num_epochs(self,*, X, test_X, test_learning_rate, batch_size = 32, max_epochs = 200,
+        tolerance = 1e-4, patience = 3):
 
-    def _get_save_data(self):
-        return dict(weights = self.state_dict())
+        X = self._validate_data(X)
 
-    def _load_save_data(self, data):
-        self.load_state_dict(data['weights'])
-        self.eval()
-        self.to_cpu()
-        return self
+        test_lr = test_learning_rate
+
+        optimizer = pyro.optim.Adam(dict(lr = test_lr))
+        self.svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
+        self.epoch_loss = []
+        early_stopper = EarlyStopping(tolerance=tolerance, patience=patience)
+        self.num_epochs_trained = 0
+
+        t = trange(max_epochs, desc = 'Epoch 0', leave = True)
+        for epoch in t:
+            #train step
+            self.train()
+            for batch in self._get_batches(X, batch_size = batch_size):
+                self.svi.step(*batch)
+
+            self.epoch_loss.append(self.score(test_X))
+            self.num_epochs_trained+=1
+
+            t.set_description("Epoch {} done. Recent losses: {}".format(
+                        str(epoch + 1),
+                        ' --> '.join('{:.3e}'.format(loss) for loss in self.epoch_loss[-5:])
+                    ))
+
+            if early_stopper.should_stop_training(self.epoch_loss[-1]):
+                logger.info('Stopped training early!')
+                break
+            
+        return self.num_epochs_trained
+
+
+    @staticmethod
+    def _get_decay_rate(a1, a0, periods):
+        return np.exp(
+            np.log(a1/a0)/periods
+        )
+
+    def _get_exp_range_scheduler(self,*,min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch, decay = None,
+        epochs_per_cycle = None):
+
+        if epochs_per_cycle is None:
+            epochs_per_cycle = 4
+
+        if decay is None:
+            #decay such that max_lr == min_lr after num_epochs iterations
+            decay = self._get_decay_rate(min_learning_rate, max_learning_rate, 2*num_epochs/epochs_per_cycle)
+
+        return pyro.optim.CyclicLR({
+                'optimizer' : Adam,
+                'optim_args' : {'lr' : min_learning_rate},
+                'base_lr' : min_learning_rate, 'max_lr' : max_learning_rate, 'step_size_up' : int(epochs_per_cycle/2 * n_batches_per_epoch), 
+                'mode' : 'exp_range', 'gamma' : decay, 'cycle_momentum' : False,
+            })
+
+    @staticmethod
+    def _warmup_lr_decay(step,*,n_batches_per_epoch, lr_decay):
+        return min(1., step/n_batches_per_epoch)*(lr_decay**int(step/n_batches_per_epoch))
+
+
+    def _get_multiplicative_decay_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch):
+        
+        decay = self._get_decay_rate(min_learning_rate, max_learning_rate, num_epochs/2)
+
+        lr_function = partial(self._warmup_lr_decay, n_batches_per_epoch = n_batches_per_epoch, lr_decay = decay)
+        return pyro.optim.LambdaLR({'optimizer': Adam, 'optim_args': {'lr': max_learning_rate}, 
+            'lr_lambda' : lambda e : lr_function(e)})

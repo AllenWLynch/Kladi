@@ -8,6 +8,8 @@ import torch
 import logging
 from kladi.matrix_models.expression_model import ExpressionModel
 from kladi.matrix_models.accessibility_model import AccessibilityModel
+import gc
+
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
@@ -64,6 +66,8 @@ class ExpressionTrainer(BaseEstimator):
         
         try:
             del self.estimator
+            gc.collect()
+            torch.cuda.empty_cache()
         except AttributeError:
             pass
 

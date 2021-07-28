@@ -186,11 +186,11 @@ class ExpressionModel(BaseModel):
 
             read_scale = pyro.sample('read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1))
             
-
             mu = torch.multiply(read_scale, expr_rate)
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
 
             pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = raw_expr)
+            
 
     @scope(prefix= 'rna')
     def guide(self, raw_expr, encoded_expr, read_depth):
