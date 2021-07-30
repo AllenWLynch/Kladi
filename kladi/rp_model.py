@@ -125,7 +125,7 @@ class CisModeler(FromRegions):
 
     rp_decay = 60000
 
-    def __init__(self, species,*,accessibility_model, expression_model, genes = None,  use_trans_features = False,
+    def __init__(self, species,*,accessibility_model, expression_model, genes = None,  model_type = 'cis',
         max_iters = 150, learning_rate = 0.1, use_SGD = False, test_size = 0.2, restarts = 5,
         batch_size = 64, decay = 0.95, momentum = 0.1, cis_models = None):
 
@@ -145,7 +145,7 @@ class CisModeler(FromRegions):
         self.test_size = test_size
         self.restarts = restarts
         self.cis_models = cis_models
-        self.use_trans_features = use_trans_features
+        self.model_type = model_type
 
         self.log = LogMock()
         self.data_interface = DataInterface(species, window_size=100, make_new=False,
@@ -159,7 +159,10 @@ class CisModeler(FromRegions):
         self.region_set = genome_tools.RegionSet(regions, self.data_interface.genome)
         self.region_score_map = np.array([r.annotation for r in self.region_set.regions])
 
-        self.rp_map = 'basic'
+        self.rp_map = self._get_region_distances(
+            self.data_interface.gene_loc_set, self.region_set, self.rp_decay
+        )
+
         self.rp_map, self.refseq_genes, self.peaks = self.get_rp_map()
 
         if genes is None:
@@ -168,9 +171,40 @@ class CisModeler(FromRegions):
         self.gene_models = []
         for symbol in genes:
             try:
-                self.gene_models.append(self._get_gene_model(symbol, use_trans_features))
+                self.gene_models.append(self._get_gene_model(symbol))
             except BadGeneException as err:
                 logger.warn(str(err))
+
+
+    def _get_region_distances(self, gene_loc_set, region_set, decay):
+
+        #make regions x exons map and exons x genes map
+        #try:
+        indptr, indices, exons = [0],[],[]
+        for locus in gene_loc_set.regions:
+            new_exons = locus.annotation.get_exon_regions()
+            exons.extend(new_exons)
+            indices.extend(range(indptr[-1], indptr[-1] + len(new_exons)))
+            indptr.append(indptr[-1] + len(new_exons))
+
+        exon_gene_map = sparse.csc_matrix((np.ones(len(exons)), indices, indptr), shape = (len(exons), len(gene_loc_set.regions)))
+        
+        exons = genome_tools.RegionSet(exons, self.data_interface.genome)
+        region_exon_map = region_set.map_intersects(exons, distance_function = lambda x,y : x.overlaps(y, min_overlap_proportion=0.4),slop_distance=0) #REGIONS X EXONS
+
+        region_exon_map = region_exon_map.dot(exon_gene_map).astype(np.bool)
+
+        not_exon_promoter = 1 - region_exon_map.sum(axis = 1).astype(np.bool)
+
+        basic_rp_map = self.data_interface._make_basic_rp_map(gene_loc_set, region_set, decay).transpose()
+
+        enhanced_rp_map = basic_rp_map.multiply(not_exon_promoter) + basic_rp_map.multiply(region_exon_map)
+
+        return enhanced_rp_map.transpose()
+
+        #except Exception as err:
+        #    print(repr(err))
+            #return region_exon_map, exon_gene_map
 
     def save(self, prefix):
         for model in self.gene_models:
@@ -210,7 +244,7 @@ class CisModeler(FromRegions):
 
         return valid_regions
 
-    def _get_gene_model(self, gene_symbol, use_trans_features):
+    def _get_gene_model(self, gene_symbol):
 
         try:
             gene_idx = np.argwhere(np.array([x[3] for x in self.refseq_genes]) == gene_symbol)[0]
@@ -257,9 +291,9 @@ class CisModeler(FromRegions):
             downstream_mask = downstream_mask,
             region_score_map = self.region_score_map,
             region_mask = region_mask,
-            use_trans_features = use_trans_features,
+            model_type = self.model_type,
             use_SGD = self.use_SGD,
-            parent_model = cis_model,
+            parent_model = cis_model
         )
 
     def add_accessibility_params(self, accessibility, latent_compositions):
@@ -447,7 +481,7 @@ class CisModeler(FromRegions):
 
     def cis_trans_test(self, compare_models, pval_threshold = 0.01, idx = None,
         **feature_kwargs):
-        assert(self.use_trans_features), 'To call cis/trans test, must have trained with "use_trans_features" set to True.'
+        assert(self.model_type == 'trans'), 'To call cis/trans test, must have trained with "model_type" set to "trans".'
         
         self.load_features(**feature_kwargs)
         compare_models.load_features(**feature_kwargs)
@@ -482,7 +516,7 @@ class CisModeler(FromRegions):
 class PyroRPVI(PyroModule):
     
     def __init__(self, gene_name, *, origin, region_distances, upstream_mask, downstream_mask, 
-        region_score_map, region_mask, use_cuda = False, use_trans_features = False, use_SGD = False,
+        region_score_map, region_mask, use_cuda = False, model_type = 'cis', use_SGD = False,
         parent_model = None):
         super().__init__()
 
@@ -498,9 +532,17 @@ class PyroRPVI(PyroModule):
         self.upstream_mask = upstream_mask
         self.downstream_mask = downstream_mask
         self.promoter_mask = ~np.logical_or(self.upstream_mask, self.downstream_mask)
+        self.model_type = model_type
+
+        if model_type == 'cis':
+            self.forward = self.cis_model
+        elif model_type == 'trans':
+            self.forward = self.trans_model
+        else:
+            raise Exception('Invalid model type')
         
-        if not parent_model is None and use_trans_features:
-            self.guide_params = {k.replace('cis_', 'trans_') : v for
+        if not parent_model is None:
+            self.guide_params = {k.replace('cis_', self.model_type + '_') : v for
                 k, v in parent_model.guide().items()}
             self.bn_mean_init = parent_model.bn.running_mean
             self.bn_var_init = parent_model.bn.running_var
@@ -510,13 +552,6 @@ class PyroRPVI(PyroModule):
         
         self.max_prob = torch.tensor([0.99999], requires_grad = False).to(self.device)
         self.clear_features()
-
-        if use_trans_features:
-            self.forward = self.trans_model
-        else:
-            self.forward = self.cis_model
-        #self.forward = self.reg_model
-        self.use_trans_features = use_trans_features
 
         if use_SGD:
             self.fit = self.fit_SGD
@@ -599,10 +634,7 @@ class PyroRPVI(PyroModule):
                 deterministic=deterministic)
 
     def get_prefix(self):
-        if not self.use_trans_features:
-            return 'cis_' + self.gene
-        else:
-            return 'trans_' + self.gene
+        return self.model_type + '_' + self.gene
     
     def cis_model(self, batch_size = None, idx = None):
 
@@ -665,38 +697,45 @@ class PyroRPVI(PyroModule):
                 pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
 
 
-    def reg_model(self, batch_size = None, idx = None):
+    def phase_model(self, idx = None, batch_size = None):
+
+        #self.guide = AutoDelta(poutine.block(self, hide=[self.get_prefix() + '/phase']), init_loc_fn = init_to_mean)
 
         with scope(prefix = self.get_prefix()):
             if idx is None:
                 idx = np.arange(len(self.rd_loc))
 
-            d = 1e3 * pyro.sample('logdistance', dist.LogNormal(3.5, 1.).expand([2]).to_event(1))
+            with pyro.plate("regions", 3):
+                a = pyro.sample('a', dist.HalfNormal(1.))
 
-            a_up = pyro.sample('a_up', 
-                dist.Normal(0.,torch.pow(0.5, self.upstream_distances/d[0])).to_event(1)).float()
-
-            a_down = pyro.sample('a_down', 
-                dist.Normal(0., torch.pow(0.5, self.downstream_distances/d[1])).to_event(1)).float()
-
-            a_prom = pyro.sample('a_prom', 
-                dist.Normal(0., 1.).expand([self.promoter_weights.shape[-1]]).to_event(1)).float()
+            with pyro.plate("upstream-downstream", 2):
+                d = pyro.sample('logdistance', dist.LogNormal(np.e, 1.))
 
             theta = pyro.sample('theta', dist.Gamma(2., 0.5))
             gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
             bias = pyro.sample('bias', dist.Normal(0, 5.))
-
+            
+            with pyro.plate("phase_plate", self.phase_mask.sum()):
+                phase_prob = pyro.sample("phase_prob", dist.Beta(1/2,1))
+                phase_peaks = pyro.sample("phase", dist.Bernoulli(phase_prob), 
+                                        infer = {'enumerate' : 'sequential'})
+                
+            phase = torch.ones(len(self.region_mask))
+            phase[np.squeeze(self.phase_mask)] = phase_peaks
+            
             with pyro.plate('data', len(idx), subsample_size=batch_size) as ind:
+
+                upstream_weights = torch.multiply(self.upstream_weights.index_select(0, ind), phase[self.upstream_mask])
+                downstream_weights = torch.multiply(self.downstream_weights.index_select(0, ind), phase[self.downstream_mask])
 
                 ind = torch.tensor(idx).index_select(0, ind)
 
-                f_Z = torch.matmul(self.upstream_weights.index_select(0, ind), a_up.T).reshape((-1,)) \
-                    + torch.matmul(self.downstream_weights.index_select(0, ind), a_down.T).reshape((-1,)) \
-                    + torch.matmul(self.promoter_weights.index_select(0,ind), a_prom.T).reshape((-1,))
-
-                pyro.deterministic('f_Z', f_Z.double())
-                NB = self.get_NB_distribution(f_Z.double(), ind, theta, gamma, bias)
-
+                f_Z = a[0] * self.RP(upstream_weights, self.upstream_distances.float(), d[0])\
+                    + a[1] * self.RP(downstream_weights, self.downstream_distances.float(), d[1]) \
+                    + a[2] * self.promoter_weights.index_select(0, ind).sum(-1)
+                
+                pyro.deterministic('f_Z', f_Z.float())
+                NB = self.get_NB_distribution(f_Z.float(), ind, theta, gamma, bias)
                 pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
 
 

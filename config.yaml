@@ -1,0 +1,34 @@
+bin: /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/bin
+cis_model:
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+coverage_1:
+  fragment_file: data/mouse_prostate/atac_fragments.tsv
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+  norm_constant: 10000.0
+coverage_2:
+  fragment_file: data/mouse_prostate/atac_fragments.tsv
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+  norm_constant: 10000.0
+coverage_3:
+  fragment_file: data/mouse_prostate/atac_fragments.tsv
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+  norm_constant: 10000.0
+coverage_4:
+  fragment_file: data/mouse_prostate/atac_fragments.tsv
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+  norm_constant: 10000.0
+genes: {}
+phase_model:
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+sources:
+  datamouse_prostateatac_fragmentstsv: data/mouse_prostate/atac_fragments.tsv
+  datamouse_prostategenesbed12: data/mouse_prostate/genes.bed12
+  none: none
+targets:
+- data/mouse_prostate/genes.bed12
+- data/mouse_prostate/workdir/taco1/coverage_1-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
+- data/mouse_prostate/workdir/taco1/coverage_2-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
+- data/mouse_prostate/workdir/taco1/coverage_3-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
+- data/mouse_prostate/workdir/taco1/coverage_4-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
+- data/mouse_prostate/workdir/taco1/phase_model-cis_model-none-cis_model.bigwig
+- data/mouse_prostate/workdir/taco1/cis_model-cis_model-none-cis_model.bigwig
