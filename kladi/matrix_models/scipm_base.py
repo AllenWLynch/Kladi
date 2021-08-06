@@ -59,9 +59,8 @@ class Decoder(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, inputs):
-        inputs = self.drop(inputs)
         # the output is σ(βθ)
-        return F.softmax(self.bn(self.beta(inputs)), dim=1)
+        return F.softmax(self.bn(self.beta(self.drop(inputs))), dim=1)
 
     def get_softmax_denom(self, inputs):
         return self.bn(self.beta(inputs)).exp().sum(-1)
@@ -92,6 +91,7 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
 class BaseModel(nn.Module):
 
     I = 50
+    #beta = 0.95
 
     def __init__(self, encoder_model, decoder_model,*,
             num_modules,
@@ -291,7 +291,7 @@ class BaseModel(nn.Module):
         def lr_function(e):
             return learning_rates[e]/learning_rates[0]
         scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 
-            'optim_args': {'lr': learning_rates[0]},#, 'betas' : (0.95, 0.999)}, 
+            'optim_args': {'lr': learning_rates[0], 'betas' : (0.95, 0.999)}, 
             'lr_lambda' : lr_function})
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
@@ -390,17 +390,25 @@ class BaseModel(nn.Module):
             'lr_lambda' : lambda e : lr_function(e)})
 
 
-    def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch):
+    def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch, beta):
         
         return pyro.optim.lr_scheduler.PyroLRScheduler(OneCycleLR_Wrapper, 
-            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate, 'betas' : (0.90,0.999)}, 'max_lr' : max_learning_rate, 
+            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate, 'betas' : (beta, 0.999)}, 'max_lr' : max_learning_rate, 
             'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 'div_factor' : max_learning_rate/min_learning_rate,
             'cycle_momentum' : False, 'three_phase' : False, 'verbose' : False})
 
     def get_coherence(self, module_num, counts):
         pass
+    
+    @staticmethod
+    def _get_KL_anneal_factor(step_num, *, n_epochs, n_batches_per_epoch, n_cycles):
 
-    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32):
+        total_steps = n_epochs * n_batches_per_epoch
+        
+        return min(1., (step_num + 1)/(total_steps * 2/3 + 1))
+
+
+    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, beta = 0.95):
 
         assert(isinstance(num_epochs, int) and num_epochs > 0)
         assert(isinstance(batch_size, int) and batch_size > 0)
@@ -414,27 +422,45 @@ class BaseModel(nn.Module):
         n_observations = X.shape[0]
         n_batches = self.get_num_batches(n_observations, batch_size)
 
+        early_stopper = EarlyStopping(tolerance=3, patience=1e-4)
+
         scheduler = self._get_1cycle_scheduler(min_learning_rate = min_learning_rate, max_learning_rate = max_learning_rate,
-            n_batches_per_epoch = n_batches, num_epochs = num_epochs)
+            n_batches_per_epoch = n_batches, num_epochs = num_epochs, beta = beta)
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 
         self.training_loss, self.testing_loss, self.num_epochs_trained = [],[],0
+        
+        anneal_fn = partial(self._get_KL_anneal_factor, n_epochs = num_epochs, n_batches_per_epoch = n_batches, n_cycles = 3)
+
+        step_count = 0
+        self.anneal_factors = []
         try:
 
-            t = trange(num_epochs, desc = 'Epoch 0', leave = True) if self.training_bar else range(num_epochs)
-            for epoch in t:
-                    
+            t = trange(num_epochs+1, desc = 'Epoch 0', leave = True) if self.training_bar else range(num_epochs+1)
+            _t = iter(t)
+            epoch = 0
+            while True:
+                
+                try:
+                    next(_t)
+                except StopIteration:
+                    pass
+
                 self.train()
                 running_loss = 0.0
                 for batch in self._get_batches(X, batch_size = batch_size):
                     
-                    if batch[0].shape[0] > 1:
-                        try:
-                            running_loss += float(self.svi.step(*batch))
-                        except ValueError:
-                            raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
+                    anneal_factor = anneal_fn(step_count)
+                    self.anneal_factors.append(anneal_factor)
+                    #if batch[0].shape[0] > 1:
+                    try:
+                        running_loss += float(self.svi.step(*batch, anneal_factor = anneal_factor))
+                        step_count+=1
+                    except ValueError:
+                        raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
 
+                    if epoch < num_epochs:
                         scheduler.step()
                 
                 #epoch cleanup
@@ -447,6 +473,10 @@ class BaseModel(nn.Module):
                         str(epoch + 1),
                         ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
                     ))
+
+                epoch+=1
+                if early_stopper.should_stop_training(recent_losses[-1]) and epoch > num_epochs:
+                    break
 
         except KeyboardInterrupt:
             logger.warn('Interrupted training.')

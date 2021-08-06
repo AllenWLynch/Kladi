@@ -44,7 +44,7 @@ class ExpressionTrainer(BaseEstimator):
 
     def __init__(self, features = None, highly_variable = None, 
         num_modules = 15, encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, num_layers = 3,
-        min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32,
+        min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32, beta = 0.95,
          use_cuda = True, seed = None): 
 
         self.features = features
@@ -60,6 +60,7 @@ class ExpressionTrainer(BaseEstimator):
         self.max_learning_rate = max_learning_rate
         self.num_layers = num_layers
         self.seed = seed
+        self.beta = beta
 
     def _get_score_fn(self, X):
         return None
@@ -81,7 +82,7 @@ class ExpressionTrainer(BaseEstimator):
 
     def _get_fit_params(self):
         return dict(
-            batch_size = self.batch_size, 
+            batch_size = self.batch_size, beta = self.beta,
             min_learning_rate = self.min_learning_rate, max_learning_rate = self.max_learning_rate,
         )
 
@@ -242,10 +243,10 @@ class ExpressionTrainer(BaseEstimator):
 
 
     def tune_hyperparameters(self, X, iters = 200, cv = 5, min_modules = 5, max_modules = 55, 
-        min_epochs = 20, max_epochs = 40, study = None):
+        min_epochs = 20, max_epochs = 40, batch_sizes = [32,64,128], study = None):
 
         self.objective = ModuleObjective(self, X, cv = cv, min_modules = min_modules, max_modules = max_modules,
-            min_epochs = min_epochs, max_epochs = max_epochs, score_fn = self._get_score_fn(X))
+            min_epochs = min_epochs, max_epochs = max_epochs, batch_sizes = batch_sizes, score_fn = self._get_score_fn(X))
 
         if study is None:
             self.study = optuna.create_study(
