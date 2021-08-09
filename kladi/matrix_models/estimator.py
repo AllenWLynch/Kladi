@@ -44,7 +44,7 @@ class ExpressionTrainer(BaseEstimator):
 
     def __init__(self, features = None, highly_variable = None, 
         num_modules = 15, encoder_dropout = 0.15, decoder_dropout = 0.2, hidden = 128, num_layers = 3,
-        min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32,
+        min_learning_rate = 1e-6, max_learning_rate = 1, num_epochs = 200, batch_size = 32, beta = 0.95,
          use_cuda = True, seed = None): 
 
         self.features = features
@@ -59,6 +59,7 @@ class ExpressionTrainer(BaseEstimator):
         self.min_learning_rate = min_learning_rate
         self.max_learning_rate = max_learning_rate
         self.num_layers = num_layers
+        self.beta = beta
         self.seed = seed
 
     def _get_score_fn(self, X):
@@ -81,7 +82,7 @@ class ExpressionTrainer(BaseEstimator):
 
     def _get_fit_params(self):
         return dict(
-            batch_size = self.batch_size, 
+            batch_size = self.batch_size, beta = self.beta,
             min_learning_rate = self.min_learning_rate, max_learning_rate = self.max_learning_rate,
         )
 

@@ -57,6 +57,8 @@ class ModuleObjective:
         trial.set_user_attr('batches_trained', 0)
         cv_scores = []
 
+        num_splits = self.cv.get_num_splits(self.X)
+
         for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X)):
 
             train_counts, test_counts = self.X[train_idx].copy(), self.X[test_idx].copy()
@@ -72,7 +74,7 @@ class ModuleObjective:
 
             trial.report(np.mean(cv_scores) + (self.prune_penalty * 0.5**step), step+1)
                 
-            if trial.should_prune():
+            if trial.should_prune() and step + 1 < num_splits:
                 trial.set_user_attr('batches_trained', step+1)
                 raise optuna.TrialPruned()
 

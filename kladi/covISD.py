@@ -9,6 +9,7 @@ from sklearn.preprocessing import scale
 import warnings
 from collections import Counter
 from kladi.core.plot_utils import plot_factor_influence
+import pickle
 
 class ClusterISDSplitter:
 
@@ -25,6 +26,131 @@ class ClusterISDSplitter:
 
         for cluster_id in self.cluster_ids:
             yield (None, None, self.clusters == cluster_id)
+
+
+class ProbISD_Results:
+
+    @classmethod
+    def load(cls,*,filename, accessibility_model, expression_model):
+
+        with open(filename, 'rb') as f:
+            save_data = pickle.load(f)
+
+        for k in save_data.keys():
+            save_data[k] = np.array(save_data[k])
+
+        return cls(**save_data, accessibility_model = accessibility_model, expression_model = expression_model)
+
+
+    def __init__(self,*, factor_names, factor_ids, isd_score, genes, accessibility_model, expression_model):
+        self.factor_names = factor_names
+        self.factor_ids = factor_ids
+        self.genes = genes
+        self.accessiblity_mdoel = accessibility_model
+        self.expression_model = expression_model
+        self.isd_score = isd_score
+
+    def _get_save_data(self):
+
+        return dict(
+            factor_names = self.factor_names.tolist(),
+            factor_ids = self.factor_ids.tolist(),
+            genes = self.genes.tolist(),
+            isd_score = self.isd_score.tolist()
+        )
+
+    def save(self, filename):
+        with open(filename, 'wb') as f:
+            pickle.dump(self._get_save_data(), f)
+
+
+    def rank_factor_influence(self, gene):
+
+        assert(gene in self.genes)
+        gene_idx = np.argwhere(gene == self.genes)[0]
+
+        return self.factor_names[self.isd_score[gene_idx, :].argsort()][0][::-1]
+
+
+    def _match_TF_hits_to_expr(self):
+        
+        expression_genes_map = dict(zip(self.expression_model.genes, range(len(self.expression_model.genes))))
+        #factor_names = np.array(self.accessibility_model.factor_names)
+        
+        modeled_factor_idx, factor_expression_idx = [],[]
+        for idx, factor_name in enumerate(self.factor_names):
+            for parsed_name in self.accessibility_model._parse_motif_name(factor_name):
+                if parsed_name in expression_genes_map:
+                    modeled_factor_idx.append(idx)
+                    factor_expression_idx.append(expression_genes_map[parsed_name])
+                    break
+
+        return np.array(modeled_factor_idx), np.array(factor_expression_idx)
+        
+
+    def get_driver_TFs(self, genelist, relationship = 'activating', sort = True):
+
+        assert(relationship in ['activating','supressing'])
+        assert(isinstance(genelist, (list, np.ndarray)))
+
+        query_mask = np.isin(self.genes, genelist)
+        assert(query_mask.sum() > 0)
+        logging.info('Matched {} query genes with modeled genes.'.format(str(query_mask.sum())))
+
+        query_scores, background_scores = self.isd_score[query_mask, :], self.isd_score[~query_mask, :]
+
+        results = []
+        for factor, q, b in zip(self.factor_names, query_scores.T, background_scores.T):
+            stat, pval = mannwhitneyu(q, b, alternative = 'greater' if relationship == 'activating' else 'less')
+            results.append((factor, pval, stat))
+
+        if sort:
+            return sorted( results, key = lambda x : (x[1],-x[2]) )
+        else:
+            return results
+
+    def get_TF_gene_interaction_matrix(self):
+        return self.isd_score, self.genes, self.factor_names
+    
+    def plot_compare_gene_modules(self, module1, module2, top_n_genes=(None,None), pval_threshold = (1e-3, 1e-3),
+        palette = 'coolwarm', ax = None, figsize = (10,7), fontsize = 12, interactive = False, label_closeness = 5, max_label_repeats = 5):
+        
+        gs1 = self.expression_model.get_top_genes(module1, top_n_genes[0])
+        gs2 = self.expression_model.get_top_genes(module2, top_n_genes[1])
+        
+        _, factor_gene_idx_map = self._match_TF_hits_to_expr()
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            module1_factor_activations = self.expression_model._score_features()[module1][:, np.newaxis][factor_gene_idx_map, :]
+            module2_factor_activations = self.expression_model._score_features()[module2][:, np.newaxis][factor_gene_idx_map, :]
+        
+        hue = np.ravel(module1_factor_activations - module2_factor_activations)
+        
+        self.plot_compare_genelists(
+            gs1, gs2, axlabels = ('-log10 Module {}'.format(str(module1)), '-log10 Module {}'.format(str(module2))),
+            pval_threshold = pval_threshold, hue = hue, palette = palette, ax = ax, figsize = figsize, 
+            legend_label = 'Relative Expression \n< Module {} - Module {} >'.format(str(module2), str(module1)),
+            fontsize = fontsize, interactive = interactive, label_closeness = label_closeness, max_label_repeats = max_label_repeats,
+        )
+        
+
+    def plot_compare_genelists(self, genelist1, genelist2, axlabels = ('-log10 genelist1','-log10 genelist2'), pval_threshold = (1e-3, 1e-3),
+        hue = None, palette = 'coolwarm', hue_order = None, ax = None, figsize = (10,7), legend_label = '', show_legend = True, fontsize = 12,
+        interactive = False, color = 'grey', label_closeness = 5, max_label_repeats = 5):
+        
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize = figsize)
+
+        factor_names, l1_pvals, _ = list(zip(*self.get_driver_TFs(genelist1, sort=False)))
+        _, l2_pvals, _ = list(zip(*self.get_driver_TFs(genelist2, sort=False)))
+        
+        plot_factor_influence(ax, l1_pvals, l2_pvals, factor_names, pval_threshold = pval_threshold, hue = hue, hue_order = hue_order, 
+            palette = palette, legend_label = legend_label, show_legend = show_legend, label_closeness = label_closeness, 
+            max_label_repeats = max_label_repeats, axlabels = axlabels, fontsize = fontsize, interactive = False, color = color)
+
+
+
 
 class CovISD:
 
@@ -157,6 +283,7 @@ class CovISD:
         
         return self
 
+    
     def rank_factor_influence(self, gene):
 
         assert(gene in self.gene_names)

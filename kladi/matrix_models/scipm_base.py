@@ -390,17 +390,17 @@ class BaseModel(nn.Module):
             'lr_lambda' : lambda e : lr_function(e)})
 
 
-    def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch):
+    def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch, beta):
         
         return pyro.optim.lr_scheduler.PyroLRScheduler(OneCycleLR_Wrapper, 
-            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate, 'betas' : (0.90,0.999)}, 'max_lr' : max_learning_rate, 
+            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate, 'betas' : (beta, 0.999)}, 'max_lr' : max_learning_rate, 
             'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 'div_factor' : max_learning_rate/min_learning_rate,
             'cycle_momentum' : False, 'three_phase' : False, 'verbose' : False})
 
     def get_coherence(self, module_num, counts):
         pass
 
-    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32):
+    def fit(self, X,*, min_learning_rate, max_learning_rate, num_epochs = 200, batch_size = 32, beta = 0.95):
 
         assert(isinstance(num_epochs, int) and num_epochs > 0)
         assert(isinstance(batch_size, int) and batch_size > 0)
@@ -415,7 +415,7 @@ class BaseModel(nn.Module):
         n_batches = self.get_num_batches(n_observations, batch_size)
 
         scheduler = self._get_1cycle_scheduler(min_learning_rate = min_learning_rate, max_learning_rate = max_learning_rate,
-            n_batches_per_epoch = n_batches, num_epochs = num_epochs)
+            n_batches_per_epoch = n_batches, num_epochs = num_epochs, beta = beta)
 
         self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
 

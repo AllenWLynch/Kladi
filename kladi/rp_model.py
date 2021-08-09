@@ -25,7 +25,8 @@ from sklearn.base import BaseEstimator
 from functools import partial, wraps
 import time
 from pyro.contrib.autoname import scope
-from scipy.stats import chi2
+from scipy.stats import chi2, nbinom
+from kladi.covISD import ProbISD_Results
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -95,6 +96,8 @@ def get_expression_distribution(f_Z,*, batchnorm, rd_loc, rd_scale, softmax_deno
     mu = read_depth * rate
 
     p = torch.minimum(mu / (mu + dispersion), torch.tensor([0.99999], requires_grad = False))
+
+    pyro.deterministic('prob_success', p)
     return dist.NegativeBinomial(total_count = dispersion, probs = p)
 
 
@@ -109,12 +112,16 @@ def register_input(func):
                 assert(all([model.has_features() for model in self.gene_models])), 'Must provide features before running an inference function.'
                 return func(self, idx = idx, *args, **kwargs)
         else:
+
+
             assert(not expression is None)
             latent_comp = _get_latent_vars(self.accessibility_model, latent_comp = accessibility_latent_compositions,
                 matrix = accessibility_matrix)
 
             self.add_accessibility_params(accessibility_matrix, latent_comp)
             self.add_expression_params(expression)
+
+            list(map(lambda x : x._fix_features(), self.gene_models))
 
             return func(self, idx = idx, *args, **kwargs)
     
@@ -182,7 +189,7 @@ class CisModeler(FromRegions):
         #try:
         indptr, indices, exons = [0],[],[]
         for locus in gene_loc_set.regions:
-            new_exons = locus.annotation.get_exon_regions()
+            new_exons = (locus.annotation.get_exon_regions()[0],)
             exons.extend(new_exons)
             indices.extend(range(indptr[-1], indptr[-1] + len(new_exons)))
             indptr.append(indptr[-1] + len(new_exons))
@@ -512,6 +519,31 @@ class CisModeler(FromRegions):
 
         return sorted(results, key = lambda x : -x['test_statistic'])
 
+    @register_input
+    def driver_TF_test(self, idx = None):
+
+        hit_matrix = self.accessibility_model.factor_hits[:, self.region_score_map]
+
+        delta_logp = []
+        for model in tqdm.tqdm(self.gene_models, desc = 'Predicting driver TFs'):
+
+            model_mask = hit_matrix[:, model.region_mask].toarray().astype(np.bool)
+            delta_logp.append(model.prob_ISD(model_mask).reshape((-1,1)))
+
+        delta_logp = np.hstack(delta_logp)
+
+        delta_logp/=np.linalg.norm(delta_logp, ord = 2, axis = 0, keepdims = True)
+        delta_logp-=np.mean(delta_logp, axis = 1, keepdims = True)
+
+        return ProbISD_Results(
+            factor_names = self.accessibility_model.factor_names, 
+            factor_ids = self.accessibility_model.factor_ids,
+            isd_score = delta_logp.T, 
+            genes = self.genes, 
+            accessibility_model = self.accessibility_model, 
+            expression_model = self.expression_model,
+        )
+
 
 class PyroRPVI(PyroModule):
     
@@ -694,48 +726,6 @@ class PyroRPVI(PyroModule):
                 
                 pyro.deterministic('f_Z', f_Z)
                 NB = self.get_NB_distribution(f_Z, ind, theta, gamma, bias)
-                pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
-
-
-    def phase_model(self, idx = None, batch_size = None):
-
-        #self.guide = AutoDelta(poutine.block(self, hide=[self.get_prefix() + '/phase']), init_loc_fn = init_to_mean)
-
-        with scope(prefix = self.get_prefix()):
-            if idx is None:
-                idx = np.arange(len(self.rd_loc))
-
-            with pyro.plate("regions", 3):
-                a = pyro.sample('a', dist.HalfNormal(1.))
-
-            with pyro.plate("upstream-downstream", 2):
-                d = pyro.sample('logdistance', dist.LogNormal(np.e, 1.))
-
-            theta = pyro.sample('theta', dist.Gamma(2., 0.5))
-            gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
-            bias = pyro.sample('bias', dist.Normal(0, 5.))
-            
-            with pyro.plate("phase_plate", self.phase_mask.sum()):
-                phase_prob = pyro.sample("phase_prob", dist.Beta(1/2,1))
-                phase_peaks = pyro.sample("phase", dist.Bernoulli(phase_prob), 
-                                        infer = {'enumerate' : 'sequential'})
-                
-            phase = torch.ones(len(self.region_mask))
-            phase[np.squeeze(self.phase_mask)] = phase_peaks
-            
-            with pyro.plate('data', len(idx), subsample_size=batch_size) as ind:
-
-                upstream_weights = torch.multiply(self.upstream_weights.index_select(0, ind), phase[self.upstream_mask])
-                downstream_weights = torch.multiply(self.downstream_weights.index_select(0, ind), phase[self.downstream_mask])
-
-                ind = torch.tensor(idx).index_select(0, ind)
-
-                f_Z = a[0] * self.RP(upstream_weights, self.upstream_distances.float(), d[0])\
-                    + a[1] * self.RP(downstream_weights, self.downstream_distances.float(), d[1]) \
-                    + a[2] * self.promoter_weights.index_select(0, ind).sum(-1)
-                
-                pyro.deterministic('f_Z', f_Z.float())
-                NB = self.get_NB_distribution(f_Z.float(), ind, theta, gamma, bias)
                 pyro.sample('obs', NB.to_event(1), obs = self.gene_expr.index_select(0, ind))
 
 
@@ -952,3 +942,86 @@ class PyroRPVI(PyroModule):
     @staticmethod
     def to_numpy(X):
         return X.detach().cpu().numpy()
+
+    def prob_ISD(self, hit_masks):
+
+        running_mean, running_var = self.bn.running_mean.clone().detach(), self.bn.running_var.clone().detach()
+        upstream_weights = self.upstream_weights.clone().detach()
+        promoter_weights = self.promoter_weights.clone().detach()
+        downstream_weights = self.downstream_weights.clone().detach()
+
+        init_logp = self.get_logp().sum()
+
+        try:
+            
+            logps = []
+            for hit_mask in hit_masks:
+                self.upstream_weights = upstream_weights.clone()
+                self.upstream_weights[:, hit_mask[self.upstream_mask]] = 0.
+
+                self.downstream_weights = downstream_weights.clone()
+                self.downstream_weights[:, hit_mask[self.downstream_mask]] = 0.
+
+                self.promoter_weights = promoter_weights.clone()
+                self.promoter_weights[:, hit_mask[self.promoter_weights]] = 0.
+
+                logps.append(self.get_logp().sum())
+
+        finally:
+            self.running_mean = running_mean
+            self.running_var = running_var
+
+        return init_logp - np.array(logps)
+
+
+    def prob_ISD(self, hit_masks):
+
+        num_factors, num_regions = hit_masks.shape
+        hit_masks = np.concatenate([np.zeros((1, num_regions)).astype(bool), hit_masks]) #factors, regions
+
+        def detach_and_tile(x):
+            x = x.clone().detach().numpy()
+            x = np.expand_dims(x, -1)
+            return np.tile(x, num_factors+1).transpose((0,2,1))
+
+        def detach(x):
+            return x.clone().detach().numpy()
+
+        def delete_regions(weights, region_mask):
+            hits = 1 - hit_masks[:, region_mask][np.newaxis, :, :] #1, factors, regions
+            return np.multiply(weights, hits)
+
+        upstream_weights = delete_regions(detach_and_tile(self.upstream_weights), self.upstream_mask) #cells, factors, regions
+        promoter_weights = delete_regions(detach_and_tile(self.promoter_weights), self.promoter_mask)
+        downstream_weights = delete_regions(detach_and_tile(self.downstream_weights), self.downstream_mask)
+
+        rd_loc = detach(self.rd_loc)[:, np.newaxis]
+        softmax_denom = detach(self.softmax_denom)[:, np.newaxis]
+        expression = detach(self.gene_expr)
+        
+        upstream_distances = detach(self.upstream_distances)[:, np.newaxis, :]
+        downstream_distances = detach(self.downstream_distances)[:,np.newaxis, :]
+
+        def RP(weights, distances, d):
+            return (weights * np.power(0.5, distances/(1e3 * d))).sum(-1)
+
+        params = self.get_normalized_params()
+
+        f_Z = params['a'][0] * RP(upstream_weights, upstream_distances, params['logdistance'][0]) \
+        + params['a'][1] * RP(downstream_weights, downstream_distances, params['logdistance'][1]) \
+        + params['a'][2] * promoter_weights.sum(-1) # cells, factors
+        
+        #f_Z = (f_Z - self.bn.running_mean.numpy())/(np.sqrt(self.bn.running_var.numpy() + self.bn.eps))
+        f_Z = (f_Z - f_Z.mean(0,keepdims = True))/np.sqrt(f_Z.var(0, keepdims = True) + self.bn.eps)
+        #f_Z = (f_Z - f_Z.mean())/np.sqrt(f_Z.var() + self.bn.eps)
+
+        indep_rate = np.exp(params['gamma'] * f_Z + params['bias'])
+        compositional_rate = indep_rate/softmax_denom
+        
+        mu = np.exp(rd_loc) * compositional_rate
+        
+        p = mu / (mu + params['theta'])
+        
+        logp_data = nbinom(params['theta'], 1 - p).logpmf(expression).sum(0)
+        
+        return logp_data[0] - logp_data[1:]
