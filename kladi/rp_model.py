@@ -133,7 +133,7 @@ class CisModeler(FromRegions):
     rp_decay = 60000
 
     def __init__(self, species,*,accessibility_model, expression_model, genes = None,  model_type = 'cis',
-        max_iters = 150, learning_rate = 0.1, use_SGD = False, test_size = 0.2, restarts = 5,
+        max_iters = 150, learning_rate = 1, use_SGD = False, test_size = 0.2, restarts = 5,
         batch_size = 64, decay = 0.95, momentum = 0.1, cis_models = None):
 
         assert(species in ['mm10','hg38'])
@@ -189,7 +189,7 @@ class CisModeler(FromRegions):
         #try:
         indptr, indices, exons = [0],[],[]
         for locus in gene_loc_set.regions:
-            new_exons = (locus.annotation.get_exon_regions()[0],)
+            new_exons = [locus.annotation.get_exon_regions()[0]]
             exons.extend(new_exons)
             indices.extend(range(indptr[-1], indptr[-1] + len(new_exons)))
             indptr.append(indptr[-1] + len(new_exons))
@@ -197,7 +197,7 @@ class CisModeler(FromRegions):
         exon_gene_map = sparse.csc_matrix((np.ones(len(exons)), indices, indptr), shape = (len(exons), len(gene_loc_set.regions)))
         
         exons = genome_tools.RegionSet(exons, self.data_interface.genome)
-        region_exon_map = region_set.map_intersects(exons, distance_function = lambda x,y : x.overlaps(y, min_overlap_proportion=0.4),slop_distance=0) #REGIONS X EXONS
+        region_exon_map = region_set.map_intersects(exons, distance_function = lambda x,y : x.overlaps(y, min_overlap_proportion=0.3),slop_distance=0) #REGIONS X EXONS
 
         region_exon_map = region_exon_map.dot(exon_gene_map).astype(np.bool)
 
@@ -887,7 +887,7 @@ class PyroRPVI(PyroModule):
 
                 params = {site["value"].unconstrained() for site in param_capture.trace.nodes.values()}
                 optimizer = torch.optim.LBFGS(params, lr=learning_rate)
-                early_stopper = EarlyStopping(patience = 3, tolerance = 1e-3)
+                early_stopper = EarlyStopping(patience = 1, tolerance = 1e-3)
 
                 def closure():
                     optimizer.zero_grad()

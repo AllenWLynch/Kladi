@@ -22,6 +22,7 @@ from kladi.core.plot_utils import plot_factor_influence
 import matplotlib.pyplot as plt
 from kladi.matrix_models.scipm_base import Decoder
 from pyro.contrib.autoname import scope
+from pyro import poutine
 
 class ZeroPaddedBinaryMultinomial(pyro.distributions.Multinomial):
     
@@ -49,7 +50,7 @@ class DANEncoder(nn.Module):
         self.embedding = nn.Embedding(num_peaks + 1, hidden, padding_idx=0)
         self.num_topics = num_topics
         self.fc_layers = get_fc_stack(
-            layer_dims = [hidden + 1, *[hidden]*(num_layers-1), 2*num_topics],
+            layer_dims = [hidden + 1, *[hidden]*(num_layers-2), 2*num_topics],
             dropout = dropout, skip_nonlin = True
         )
 
@@ -106,7 +107,7 @@ class AccessibilityModel(BaseModel):
         super().__init__(DANEncoder, Decoder, **kwargs)
             
     @scope(prefix='atac')
-    def model(self, endog_peaks, exog_peaks, read_depth):
+    def model(self, endog_peaks, exog_peaks, read_depth, anneal_factor = 1.):
 
         pyro.module("decoder", self.decoder)
 
@@ -121,8 +122,10 @@ class AccessibilityModel(BaseModel):
         with pyro.plate("cells", exog_peaks.shape[0]):
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
 
-            theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+            with poutine.scale(None, anneal_factor):
+                theta = pyro.sample(
+                    "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+
             theta = theta/theta.sum(-1, keepdim = True)
             # conditional distribution of 𝑤𝑛 is defined as
             # 𝑤𝑛|𝛽,𝜃 ~ Categorical(𝜎(𝛽𝜃))
@@ -137,7 +140,7 @@ class AccessibilityModel(BaseModel):
         return peak_probs
 
     @scope(prefix = 'atac')
-    def guide(self, endog_peaks, exog_peaks, read_depth):
+    def guide(self, endog_peaks, exog_peaks, read_depth, anneal_factor = 1.):
 
         pyro.module("encoder", self.encoder)
 
@@ -154,8 +157,10 @@ class AccessibilityModel(BaseModel):
             # where μ and Σ are the encoder network outputs
             theta_loc, theta_scale = self.encoder(endog_peaks, read_depth)
 
-            theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+            with poutine.scale(None, anneal_factor):
+                    
+                theta = pyro.sample(
+                    "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
 
 
     def _get_latent_MAP(self, endog_peaks, exog_peaks, read_depth):

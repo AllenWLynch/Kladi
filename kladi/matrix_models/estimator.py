@@ -61,6 +61,7 @@ class ExpressionTrainer(BaseEstimator):
         self.num_layers = num_layers
         self.beta = beta
         self.seed = seed
+        self.beta = beta
 
     def _get_score_fn(self, X):
         return None
@@ -243,10 +244,10 @@ class ExpressionTrainer(BaseEstimator):
 
 
     def tune_hyperparameters(self, X, iters = 200, cv = 5, min_modules = 5, max_modules = 55, 
-        min_epochs = 20, max_epochs = 40, study = None):
+        min_epochs = 20, max_epochs = 40, batch_sizes = [32,64,128], study = None):
 
         self.objective = ModuleObjective(self, X, cv = cv, min_modules = min_modules, max_modules = max_modules,
-            min_epochs = min_epochs, max_epochs = max_epochs, score_fn = self._get_score_fn(X))
+            min_epochs = min_epochs, max_epochs = max_epochs, batch_sizes = batch_sizes, score_fn = self._get_score_fn(X))
 
         if study is None:
             self.study = optuna.create_study(
@@ -255,7 +256,8 @@ class ExpressionTrainer(BaseEstimator):
             )
         
         try:
-            self.study.optimize(self.objective, n_trials = iters, callbacks = [self._print_study], catch = (RuntimeError,),)
+            self.study.optimize(self.objective, n_trials = iters, callbacks = [self._print_study], 
+            catch = (RuntimeError,ValueError),)
         except KeyboardInterrupt:
             pass
         

@@ -2,6 +2,7 @@
 from os import stat
 import numpy as np
 import pyro
+from pyro import poutine
 import pyro.distributions as dist
 import torch
 import torch.nn as nn
@@ -160,7 +161,7 @@ class ExpressionModel(BaseModel):
         super().__init__(ExpressionEncoder, Decoder, **kwargs)
 
     @scope(prefix= 'rna')
-    def model(self, raw_expr, encoded_expr, read_depth):
+    def model(self, raw_expr, encoded_expr, read_depth, anneal_factor = 1.):
 
         pyro.module("decoder", self.decoder)
 
@@ -179,13 +180,14 @@ class ExpressionModel(BaseModel):
         with pyro.plate("cells", encoded_expr.shape[0]):
 
             # Dirichlet prior  𝑝(𝜃|𝛼) is replaced by a log-normal distribution
-            theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+            with poutine.scale(None, anneal_factor):
+                theta = pyro.sample(
+                    "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+
+                read_scale = pyro.sample('read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1))
+
             theta = theta/theta.sum(-1, keepdim = True)
             expr_rate = self.decoder(theta)
-
-            read_scale = pyro.sample('read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1))
-            
 
             mu = torch.multiply(read_scale, expr_rate)
             p = torch.minimum(mu / (mu + self.dispersion), self.max_prob)
@@ -193,7 +195,7 @@ class ExpressionModel(BaseModel):
             pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = raw_expr)
 
     @scope(prefix= 'rna')
-    def guide(self, raw_expr, encoded_expr, read_depth):
+    def guide(self, raw_expr, encoded_expr, read_depth, anneal_factor = 1.):
 
         pyro.module("encoder", self.encoder)
 
@@ -211,13 +213,15 @@ class ExpressionModel(BaseModel):
             # where μ and Σ are the encoder network outputs
             theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(encoded_expr)
 
-            theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
-            )
+            with poutine.scale(None, anneal_factor):
+                theta = pyro.sample(
+                    "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
+                )
 
-            read_depth = pyro.sample(
-                "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
-            )
+                read_depth = pyro.sample(
+                    "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
+                )
+            
 
     def _get_expression_distribution_parameters(self, raw_expr, batch_size = 32):
         

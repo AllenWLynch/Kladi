@@ -13,7 +13,7 @@ class ModuleObjective:
     def __init__(self, estimator, X, cv = 5, 
         min_modules = 5, max_modules = 55, 
         min_epochs = 15, max_epochs = 50, 
-        min_dropout = 0.01, max_dropout = 0.3,
+        min_dropout = 0.01, max_dropout = 0.1,
         batch_sizes = [32,64,128], seed = 2556, 
         score_fn = None, prune_penalty = 0.01):
 
@@ -47,6 +47,7 @@ class ModuleObjective:
             batch_size = trial.suggest_categorical('batch_size', self.batch_sizes),
             encoder_dropout = trial.suggest_float('encoder_dropout', self.min_dropout, self.max_dropout),
             num_epochs = trial.suggest_int('num_epochs', self.min_epochs, self.max_epochs, log = True),
+            beta = trial.suggest_float('beta', 0.90, 0.99, log = True),
             seed = np.random.randint(0, 2**32 - 1),
         )
 
@@ -57,7 +58,7 @@ class ModuleObjective:
         trial.set_user_attr('batches_trained', 0)
         cv_scores = []
 
-        num_splits = self.cv.get_num_splits(self.X)
+        num_splits = self.cv.get_n_splits(self.X)
 
         for step, (train_idx, test_idx) in enumerate(self.cv.split(self.X)):
 
