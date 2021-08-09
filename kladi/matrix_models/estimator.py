@@ -255,7 +255,8 @@ class ExpressionTrainer(BaseEstimator):
             )
         
         try:
-            self.study.optimize(self.objective, n_trials = iters, callbacks = [self._print_study], catch = (RuntimeError,),)
+            self.study.optimize(self.objective, n_trials = iters, callbacks = [self._print_study], 
+            catch = (RuntimeError,ValueError),)
         except KeyboardInterrupt:
             pass
         
