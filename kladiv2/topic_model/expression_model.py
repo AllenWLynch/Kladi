@@ -12,27 +12,23 @@ import warnings
 from scipy.sparse import isspmatrix
 import json
 import requests
-from itertools import zip_longest
 import configparser
 from functools import partial
+from pyro import poutine
+from kladiv2.core.adata_interface import *
+from kladiv2.plots.base import map_plot
+from kladiv2.plots.enrichment_plot import plot_enrichment
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 config = configparser.ConfigParser()
 config.read('kladi/matrix_models/config.ini')
 
-def grouper(iterable, n, fillvalue=None):
-    "Collect data into fixed-length chunks or blocks"
-    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
-    args = [iter(iterable)] * n
-    return zip_longest(*args, fillvalue=fillvalue)
 
-def compact_string(x, max_wordlen = 4, join_spacer = ' ', sep = ' '):
-    return '\n'.join(
-        [
-            join_spacer.join([x for x in segment if not x == '']) for segment in grouper(x.split(sep), max_wordlen, fillvalue='')
-        ]
-    )
+class ExpressionEncoder(torch.nn.Module):
 
-class ExpressionEncoder(nn.Module):
 
     def __init__(self,*,num_endog_features, num_topics, hidden, dropout, num_layers):
         super().__init__()
@@ -44,7 +40,9 @@ class ExpressionEncoder(nn.Module):
             dropout = dropout, skip_nonlin = True
         )
         
-    def forward(self, X):
+    def forward(self, X, read_depth):
+
+        X = torch.hstack([X, torch.log(read_depth)])
 
         X = self.fc_layers(X)
 
@@ -56,8 +54,18 @@ class ExpressionEncoder(nn.Module):
 
         return theta_loc, theta_scale, rd_loc, rd_scale
 
+    def topic_comps(self, X, read_depth):
 
-def ExpressionModel(BaseModel):
+        theta = self.forward(X, read_depth)[0]
+        theta = theta.exp()/theta.exp().sum(-1, keepdim = True)
+        
+        return theta.detach().cpu().numpy()
+
+    def read_depth(self, X, read_depth):
+        return self.forward(X, read_depth)[2].detach().cpu().numpy()
+
+
+class ExpressionModel(BaseModel):
 
     encoder_model = ExpressionEncoder
 
@@ -89,53 +97,56 @@ def ExpressionModel(BaseModel):
         return np.clip(np.nan_to_num(r_ij), -10, 10)
 
 
-    def _get_weights(self):
-        super()._get_weights()
-
-        self.dispersion = PyroParam(torch.ones(self.exog_features) * 5, constraint = constraints.positive)
-
-
     @scope(prefix= 'rna')
-    def model(self,*,endog_features, exog_features, read_depth):
-        theta_loc, theta_scale = super().model(endog_features = endog_features, exog_features = exog_features)
+    def model(self,*,endog_features, exog_features, read_depth, anneal_factor = 1.):
+        theta_loc, theta_scale = super().model()
         pyro.module("decoder", self.decoder)
 
+        dispersion = pyro.param('dispersion', torch.ones(self.num_exog_features) * 5., constraint = constraints.positive)
+
         with pyro.plate("cells", endog_features.shape[0]):
-
-            theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
-            theta = theta/theta.sum(-1, keepdim = True)
             
-            expr_rate = self.decoder(theta)
+            with poutine.scale(None, anneal_factor):
+                theta = pyro.sample(
+                    "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1))
+                theta = theta/theta.sum(-1, keepdim = True)
+                
+                expr_rate = self.decoder(theta)
 
-            read_scale = pyro.sample('read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1))
-            
+                read_scale = pyro.sample('read_depth', dist.LogNormal(torch.log(read_depth), 1.).to_event(1))
+                
             mu = torch.multiply(read_scale, expr_rate)
-            p = mu / (mu + self.dispersion)
+            p = mu / (mu + dispersion)
 
-            pyro.sample('obs', dist.NegativeBinomial(total_count = self.dispersion, probs = p).to_event(1), obs = exog_features)
+            pyro.sample('obs', dist.NegativeBinomial(total_count = dispersion, probs = p).to_event(1), obs = exog_features)
 
 
     @scope(prefix= 'rna')
-    def guide(self, endog_features, exog_features, read_depth):
-        super().guide(endog_features = endog_features, exog_features = exog_features, read_depth = read_depth)
-        pyro.module("encoder", self.encoder)
-
-        endog_features = torch.cat([endog_features, torch.log(read_depth)])
+    def guide(self,*,endog_features, exog_features, read_depth, anneal_factor = 1.):
+        super().guide()
 
         with pyro.plate("cells", endog_features.shape[0]):
             
-            theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(endog_features)
+            theta_loc, theta_scale, rd_loc, rd_scale = self.encoder(endog_features, read_depth)
 
-            theta = pyro.sample(
-                "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
-            )
+            with poutine.scale(None, anneal_factor):
+                theta = pyro.sample(
+                    "theta", dist.LogNormal(theta_loc, theta_scale).to_event(1)
+                )
 
-            read_depth = pyro.sample(
-                "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
-            )
+                read_depth = pyro.sample(
+                    "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
+                )
 
-    def _preprocess_endog(self, X):
+    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= partial(add_obs_col, colname = 'model_read_scale'),
+        del_kwargs=['endog_features','exog_features'])
+    def _get_read_depth(self, *, endog_features, exog_features, batch_size = 512):
+
+        return self._run_encoder_fn(self.encoder.read_depth, endog_features = endog_features, exog_features = exog_features, 
+            batch_size =batch_size, bar = False, desc = 'Calculating reads scale')
+        
+
+    def _preprocess_endog(self, X, read_depth):
         
         assert(isinstance(X, np.ndarray) or isspmatrix(X))
         
@@ -152,7 +163,7 @@ def ExpressionModel(BaseModel):
         
         assert(np.isclose(X.astype(np.int64), X, 1e-2).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
-        X = self._residual_transformation(X.astype(np.float32), self.residual_pi)
+        X = self._residual_transform(X.astype(np.float32), self.residual_pi)
 
         return torch.tensor(X, requires_grad = False).to(self.device)
 
@@ -169,46 +180,26 @@ def ExpressionModel(BaseModel):
         
         assert(np.isclose(X.astype(np.int64), X, 1e-2).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
         return torch.tensor(X.astype(np.float32), requires_grad = False).to(self.device)
-        
+
+    def _get_save_data(self):
+        data = super()._get_save_data()
+        data['fit_params']['residual_pi'] = self.residual_pi
+
+        return data
     
-    def rank_genes(self, module_num):
+    def rank_genes(self, topic_num):
         '''
-        Ranks genes according to their activation in module ``module_num``. Sorted from most suppressed to most activated.
+        Ranks genes according to their activation in module ``topic_num``. Sorted from most suppressed to most activated.
 
         Args:
-            module_num (int): For which module to rank genes
+            topic_num (int): For which module to rank genes
 
         Returns:
             np.ndarray: sorted array of gene names in order from most suppressed to most activated given the specified module
         '''
-        assert(isinstance(module_num, int) and module_num < self.num_topics and module_num >= 0)
+        assert(isinstance(topic_num, int) and topic_num < self.num_topics and topic_num >= 0)
 
-        return self.genes[np.argsort(self._score_features()[module_num, :])]
-
-    def get_top_genes(self, module_num, top_n = None):
-        '''
-        For a module, return the top n genes that are most activated.
-
-        Args:
-            module_num (int): For which module to return most activated genes
-            top_n (int): number of genes to return
-
-        Returns
-            (np.ndarray): Names of top n genes, sorted from least to most activated
-        '''
-
-        if top_n is None:
-            gene_scores = self._score_features()[module_num,:]
-            top_genes_mask = gene_scores - gene_scores.mean() > 2
-
-            if top_genes_mask.sum() > 200:
-                return self.genes[top_genes_mask]
-            else:
-                top_n = 200
-
-        assert(isinstance(top_n, int) and top_n > 0)
-        return self.rank_genes(module_num)[-top_n : ]
-
+        return self.genes[np.argsort(self._score_features()[topic_num, :])]
 
     def rank_modules(self, gene):
         '''
@@ -221,34 +212,56 @@ def ExpressionModel(BaseModel):
             AssertionError: if ``gene`` is not in self.genes
         
         Returns:
-            (list): of format [(module_num, activation), ...]
+            (list): of format [(topic_num, activation), ...]
         '''
         
         assert(gene in self.genes)
 
         gene_idx = np.argwhere(self.genes == gene)[0]
         return list(sorted(zip(range(self.num_topics), self._score_features()[:, gene_idx]), key = lambda x : x[1]))
-    
 
-    def _post_genelist(self, module_num, top_n = None):
+
+    def get_top_genes(self, topic_num, top_n = None, min_genes = 200, max_genes = 600):
         '''
-        Post genelist to Enrichr, recieve genelist ID for later retreival.
+        For a module, return the top n genes that are most activated.
 
         Args:
-            module_num (int): which module's top genes to post
-            top_n_genes (int): number of genes to post
+            topic_num (int): For which module to return most activated genes
+            top_n (int): number of genes to return
 
-        Returns:
-            enrichr_id (str): unique ID of genelist for retreival with ``get_enrichments`` or ``get_ontology``
+        Returns
+            (np.ndarray): Names of top n genes, sorted from least to most activated
         '''
 
-        top_genes = '\n'.join(self.get_top_genes(module_num, top_n=top_n))
+        if top_n is None:
+            gene_scores = self._score_features()[topic_num,:]
+            top_genes_mask = gene_scores - np.maxmimum(gene_scores.mean(),0) > 2
+
+            genes_found = top_genes_mask.sum() 
+
+            if genes_found > min_genes:
+                if genes_found > max_genes:
+                    logger.warn('Topic {} enriched for too many ({}) genes, truncating to {}.'.format(str(topic_num), str(genes_found), str(max_genes)))
+                    return self.rank_genes(topic_num)[-max_genes:]
+                else:
+                    return self.genes[top_genes_mask]
+            else:
+                logger.warn('Topic {} enriched for too few ({}) genes, taking top {}.'.format(str(topic_num), str(genes_found), str(min_genes)))
+                return self.rank_genes(topic_num)[-min_genes : ]
+
+        else:
+
+            assert(isinstance(top_n, int) and top_n > 0)
+            return self.rank_genes(topic_num)[-top_n : ]
+    
+
+    def _post_genelist(self, genelist):
 
         enrichr_url = config.get('Enrichr','url')
         post_endpoint = config.get('Enrichr','post')
 
         payload = {
-            'list': (None, top_genes),
+            'list': (None, '\n'.join(genelist)),
         }
 
         response = requests.post(enrichr_url + post_endpoint, files=payload)
@@ -258,37 +271,31 @@ def ExpressionModel(BaseModel):
         list_id = json.loads(response.text)['userListId']
         return list_id
 
+
+    def post_topic(self, topic_num, top_n = None, min_genes = 200, max_genes = 600):
+
+        list_id = self._post_genelist(
+            self.get_top_genes(topic_num, top_n = top_n, min_genes = min_genes, max_genes = max_genes)
+        )
+
+        self.enrichments[topic_num] = dict(
+            list_id = list_id,
+            results = {}
+        )
+
+    def post_topics(self, top_n = None, min_genes = 200, max_genes = 600):
+
+        for i in range(self.num_topics):
+            self.post_topic(i, top_n = top_n, min_genes = min_genes, max_genes = max_genes)
+
     def _get_ontology(self, list_id, ontology = 'WikiPathways_2019_Human'):
-        '''
-        Fetches the gene-set enrichments for a genelist in a certain ontology from Enrichr
-
-        Args:
-            list_id (str): unique ID of genelist from ``post_genelist``
-            ontology (str, default = Wikipathways_2019_Human): For which ontology to download results
-
-        Returns:
-            (dict): enrichments, with format:
-
-                {
-                    ontology: {
-                        rank : [...],
-                        term : [...],
-                        pvalue : [...],
-                        zscore : [...],
-                        combined_score : [...],
-                        genes : [...],
-                        adj_pvalue : [...]
-                    }
-
-                }
-        '''
 
         enrichr_url = config.get('Enrichr','url')
         get_endpoint = config.get('Enrichr','get').format(list_id = list_id, ontology = ontology)
 
         response = requests.get(enrichr_url + get_endpoint)
         if not response.ok:
-            raise Exception('Error fetching enrichment results')
+            raise Exception('Error fetching enrichment results: \n' + str(response))
         
         data = json.loads(response.text)[ontology]
 
@@ -297,68 +304,29 @@ def ExpressionModel(BaseModel):
         return {ontology : [dict(zip(headers, x)) for x in data]}
 
 
-    def _get_enrichments(self, list_id, ontologies = config.get('Enrichr','ontologies').split(',')):
-        '''
-        Fetches the gene-set enrichments for a genelist from ontologies listed
+    def get_topic_enrichments(self, topic_num, ontologies = config.get('Enrichr','ontologies').split(',')):
 
-        Args:
-            list_id (str): unique ID of genelist from ``post_genelist``
-            ontologies (list, default in kladi/matrix_models/config.ini): or which ontologies to download results
+        try:
+            self.enrichments
+        except AttributeError:
+            raise AttributeError('User must run "post_topic" or "post_topics" before getting enrichments')
 
-        Returns:
-            (dict): enrichments, with format:
+        try:
+            list_id = self.enrichments[topic_num]['list_id']
+        except (KeyError, IndentationError):
+            raise KeyError('User has not posted topic yet, run "post_topic" first.')
 
-                {
-                    ontology: {
-                        rank : [...],
-                        term : [...],
-                        pvalue : [...],
-                        zscore : [...],
-                        combined_score : [...],
-                        genes : [...],
-                        adj_pvalue : [...]
-                    }
-                    ...
-                }
-        '''
-
-
-        enrichments = dict()
         for ontology in ontologies:
-            enrichments.update(self.get_ontology(list_id, ontology=ontology))
+            self.enrichments[topic_num]['results'].update(self._get_ontology(list_id, ontology=ontology))
 
-        return enrichments
 
-    @staticmethod
-    def _enrichment_plot(ax, ontology, results,*,
-        text_color, show_top, barcolor, show_genes, max_genes):
-
-        terms, genes, pvals = [],[],[]
-        for result in results[:show_top]:
-            
-            terms.append(
-                compact_string(result['term'])
-            )        
-            genes.append(' '.join(result['genes'][:max_genes]))
-            pvals.append(-np.log10(result['pvalue']))
-            
-        ax.barh(np.arange(len(terms)), pvals, color=barcolor)
-        ax.set_yticks(np.arange(len(terms)))
-        ax.set_yticklabels(terms)
-        ax.invert_yaxis()
-        ax.set(title = ontology, xlabel = '-log10 pvalue')
-        ax.spines['right'].set_visible(False)
-        ax.spines['top'].set_visible(False)
-        ax.yaxis.set_ticks_position('left')
-        ax.xaxis.set_ticks_position('bottom')
+    def get_enrichments(self,  ontologies = config.get('Enrichr','ontologies').split(',')):
         
-        if show_genes:
-            for j, p in enumerate(ax.patches):
-                _y = p.get_y() + p.get_height() - p.get_height()/3
-                ax.text(0.1, _y, compact_string(genes[j], max_wordlen=10, join_spacer = ', '), ha="left", color = text_color)
+        for i in range(self.num_topics):
+            self.get_topic_enrichments(i, ontologies = ontologies)
 
 
-    def _plot_enrichments(self, enrichment_results, show_genes = True, show_top = 5, barcolor = 'lightgrey',
+    def plot_enrichments(self, topic_num, show_genes = True, show_top = 5, barcolor = 'lightgrey', label_genes = [],
         text_color = 'black', return_fig = False, enrichments_per_row = 2, height = 4, aspect = 2.5, max_genes = 15):
         '''
         Make plot of geneset enrichments given results from ``get_ontology`` or ``get_enrichments``.
@@ -385,13 +353,25 @@ def ExpressionModel(BaseModel):
             matplotlib.figure, matplotlib.axes.Axes
 
         '''
+
+        try:
+            self.enrichments
+        except AttributeError:
+            raise AttributeError('User must run "post_topic" or "post_topics" before getting enrichments')
+
+        try:
+            results = self.enrichments[topic_num]['results']
+        except (KeyError, IndentationError):
+            raise KeyError('User has not posted topic yet, run "post_topic" first.')
+
+        if len(results) == 0:
+            raise Exception('No results for this topic, user must run "get_topic_enrichments" or "get_enrichments" before plotting.')
         
-        func = partial(self._enrichment_plot, text_color = text_color, 
+        func = partial(plot_enrichment, text_color = text_color, label_genes = label_genes,
             show_top = show_top, barcolor = barcolor, show_genes = show_genes, max_genes = max_genes)
 
-        fig, ax = map_plot(func, enrichment_results.keys(), enrichment_results.values(), plots_per_row = enrichments_per_row, 
+        fig, ax = map_plot(func, list(results.items()), plots_per_row = enrichments_per_row, 
             height =height, aspect = aspect)  
-            
-        plt.tight_layout()
+
         if return_fig:
             return fig, ax

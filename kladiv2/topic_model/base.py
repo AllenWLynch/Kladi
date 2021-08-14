@@ -14,12 +14,11 @@ from pyro.nn import PyroModule, PyroParam
 import numpy as np
 import torch.distributions.constraints as constraints
 import logging
-from kladi.matrix_models.ilr import ilr, _gram_schmit_basis
 from math import ceil
 import time
 from pyro.contrib.autoname import scope
 from sklearn.base import BaseEstimator
-from adata_interface import *
+from kladiv2.core.adata_interface import *
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +54,7 @@ class EarlyStopping:
         return False
 
 
-class Decoder(nn.Module):
+class Decoder(torch.nn.Module):
     
     def __init__(self,*,num_exog_features, num_topics, dropout):
         super().__init__()
@@ -95,19 +94,50 @@ def get_fc_stack(layer_dims = [256, 128, 128, 128], dropout = 0.2, skip_nonlin =
     ])
 
 
-class BaseModel(nn.Module, BaseEstimator):
+class BaseModel(torch.nn.Module, BaseEstimator):
 
     I = 50
 
+    @classmethod
+    def load_old_model(cls, filename):
+
+        old_model = torch.load(filename)
+
+        params = old_model['params'].copy()
+        params['num_topics'] = params.pop('num_modules')
+        
+        fit_params = {}
+        fit_params['num_exog_features'] = len(params['features'])
+        fit_params['num_endog_features'] = params['highly_variable'].sum()
+        fit_params['highly_variable'] = params.pop('highly_variable')
+        fit_params['features'] = params.pop('features')
+        
+        model = cls(**params)
+        model._set_weights(fit_params, old_model['model']['weights'])
+
+        if 'pi' in old_model['model']:
+            model.residual_pi = old_model['model']['pi']
+        
+        return model
+
+    @classmethod
+    def load(cls, filename):
+
+        data = torch.load(filename)
+
+        model = cls(**data['params'])
+        model._set_weights(data['fit_params'], data['weights'])
+
+        return model
+
     def __init__(self,
-            highly_variable = None,
-            predict_expression = None,
+            highly_variable_key = None,
+            predict_expression_key = None,
             counts_layer = None,
-            covariates = [],
-            batch_index = None,
             num_topics = 16,
             hidden = 128,
             num_layers = 3,
+            num_epochs = 40,
             decoder_dropout = 0.2,
             encoder_dropout = 0.1,
             use_cuda = True,
@@ -116,17 +146,17 @@ class BaseModel(nn.Module, BaseEstimator):
             max_learning_rate = 1e-1,
             beta = 0.95,
             batch_size = 64,
+            training_bar = True,
             ):
         super().__init__()
 
-        self.highly_variable = highly_variable
-        self.predict_expression = predict_expression
+        self.highly_variable_key = highly_variable_key
+        self.predict_expression_key = predict_expression_key
         self.counts_layer = counts_layer
-        self.covariates = covariates
-        self.batch_index = batch_index
         self.num_topics = num_topics
         self.hidden = hidden
         self.num_layers = num_layers
+        self.num_epochs = num_epochs
         self.decoder_dropout = decoder_dropout
         self.encoder_dropout = encoder_dropout
         self.use_cuda = use_cuda
@@ -135,28 +165,29 @@ class BaseModel(nn.Module, BaseEstimator):
         self.max_learning_rate = max_learning_rate
         self.beta = beta
         self.batch_size = batch_size
+        self.training_bar = training_bar
 
     def _set_seeds(self):
         if self.seed is None:
-            seed = int(time.time() * 1e7)%(2**32-1)
+            self.seed = int(time.time() * 1e7)%(2**32-1)
 
-        torch.manual_seed(seed)
-        pyro.set_rng_seed(seed)
-        np.random.seed(seed)
+        torch.manual_seed(self.seed)
+        pyro.set_rng_seed(self.seed)
+        np.random.seed(self.seed)
 
-    def _get_weights(self):
+    def _get_weights(self, on_gpu = True):
 
         pyro.clear_param_store()
         torch.cuda.empty_cache()
         self._set_seeds()
 
         assert(isinstance(self.use_cuda, bool))
-        assert(isinstance(self.num_modules, int) and self.num_modules > 0)
+        assert(isinstance(self.num_topics, int) and self.num_topics > 0)
         assert(isinstance(self.features, (list, np.ndarray)))
         assert(len(self.features) == self.num_exog_features)
 
-        self.use_cuda = torch.cuda.is_available() and use_cuda
-        self.device = torch.device('cuda:0' if self.use_cuda else 'cpu')
+        use_cuda = torch.cuda.is_available() and self.use_cuda and on_gpu
+        self.device = torch.device('cuda:0' if use_cuda else 'cpu')
         if not use_cuda:
             logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
 
@@ -170,16 +201,9 @@ class BaseModel(nn.Module, BaseEstimator):
             num_endog_features = self.num_endog_features, 
             num_topics = self.num_topics, 
             hidden = self.hidden, 
-            encoder_dropout = self.encoder_dropout, 
+            dropout = self.encoder_dropout, 
             num_layers = self.num_layers
         )
-
-        _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
-
-        self.pseudocount_mu = PyroParam(_counts_mu * torch.ones((self.num_topics,)), constraint = constraints.positive)
-
-        self.pseudocount_std = PyroParam(np.sqrt(_counts_var) * torch.ones((self.num_topics,)), 
-                constraint = constraints.positive)
 
         self.K = torch.tensor(self.num_topics, requires_grad = False)
 
@@ -201,10 +225,16 @@ class BaseModel(nn.Module, BaseEstimator):
 
     def guide(self):
 
+        _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
+        pseudocount_mu = pyro.param('pseudocount_mu', _counts_mu * torch.ones((self.num_topics,)), constraint = constraints.positive)
+
+        pseudocount_std = pyro.param('pseudocount_std', np.sqrt(_counts_var) * torch.ones((self.num_topics,)), 
+                constraint = constraints.positive)
+
         pyro.module("encoder", self.encoder)
 
         with pyro.plate("topics", self.num_topics) as k:
-            initial_counts = pyro.sample("a", dist.LogNormal(self.pseudocount_mu[k], self.pseudocount_std[k]))
+            initial_counts = pyro.sample("a", dist.LogNormal(pseudocount_mu, pseudocount_std))
 
 
     @staticmethod
@@ -249,7 +279,7 @@ class BaseModel(nn.Module, BaseEstimator):
         raise NotImplementedError()
 
     def _preprocess_read_depth(self, X):
-        return self.to_tensor(X, requires_grad = False).to(self.device)
+        return torch.tensor(X, requires_grad = False).to(self.device)
 
     def _iterate_batches(self, endog_features, exog_features, batch_size = 32, bar = True, desc = None):
         
@@ -258,21 +288,50 @@ class BaseModel(nn.Module, BaseEstimator):
 
         for start, end in self._iterate_batch_idx(N, batch_size=batch_size, bar = bar, desc = desc):
             yield dict(
-                endog_features = self._preprocess_endog(endog_features[start:end]),
+                endog_features = self._preprocess_endog(endog_features[start:end], read_depth[start : end]),
                 exog_features = self._preprocess_exog(exog_features[start:end]),
                 read_depth = self._preprocess_read_depth(read_depth[start:end]),
             )
 
-    def _get_1cycle_scheduler(self,*, min_learning_rate, max_learning_rate, num_epochs, n_batches_per_epoch, beta):
+    def _get_1cycle_scheduler(self, n_batches_per_epoch):
         
         return pyro.optim.lr_scheduler.PyroLRScheduler(OneCycleLR_Wrapper, 
-            {'optimizer' : Adam, 'optim_args' : {'lr' : min_learning_rate, 'betas' : (beta, 0.999)}, 'max_lr' : max_learning_rate, 
-            'steps_per_epoch' : n_batches_per_epoch, 'epochs' : num_epochs, 'div_factor' : max_learning_rate/min_learning_rate,
+            {'optimizer' : Adam, 'optim_args' : {'lr' : self.min_learning_rate, 'betas' : (self.beta, 0.999)}, 'max_lr' : self.max_learning_rate, 
+            'steps_per_epoch' : n_batches_per_epoch, 'epochs' : self.num_epochs, 'div_factor' : self.max_learning_rate/self.min_learning_rate,
             'cycle_momentum' : False, 'three_phase' : False, 'verbose' : False})
 
-    @wraps_modelfunc(adata_extractor=partial(extract_features, include_features = True), 
-        del_kwargs=['features','endog_features','exog_features'])
-    def fit(self,*,features, endog_features, exog_features):
+    @staticmethod
+    def _get_KL_anneal_factor(step_num, *, n_epochs, n_batches_per_epoch):
+
+        total_steps = n_epochs * n_batches_per_epoch
+        
+        return min(1., (step_num + 1)/(total_steps * 2/3 + 1))
+
+    @property
+    def highly_variable(self):
+        return self._highly_variable
+
+    @highly_variable.setter
+    def highly_variable(self, h):
+        assert(isinstance(h, (list, np.ndarray)))
+        h = np.ravel(np.array(h))
+        assert(h.dtype == bool)
+        assert(len(h) == self.num_exog_features)
+        self._highly_variable = h
+
+    @property
+    def features(self):
+        return self._features
+
+    @features.setter
+    def features(self, f):
+        assert(isinstance(f, (list, np.ndarray)))
+        f = np.ravel(np.array(f))
+        assert(len(f) == self.num_exog_features)
+        self._features = f
+
+
+    def _fit(self,*,features, highly_variable, endog_features, exog_features):
 
         assert(isinstance(self.num_epochs, int) and self.num_epochs > 0)
         assert(isinstance(self.batch_size, int) and self.batch_size > 0)
@@ -282,34 +341,107 @@ class BaseModel(nn.Module, BaseEstimator):
         else:
             assert(isinstance(self.max_learning_rate, float) and self.max_learning_rate > 0)
 
-        self.features = features
+        self.enrichments = {}
         self.num_endog_features = endog_features.shape[-1]
         self.num_exog_features = exog_features.shape[-1]
-        assert(self.num_exog_features == len(self.features))
-
+        self.features = features
+        self.highly_variable = highly_variable
+        
         self._get_weights()
         
         n_observations = endog_features.shape[0]
         n_batches = self.get_num_batches(n_observations, self.batch_size)
 
+        early_stopper = EarlyStopping(tolerance=3, patience=1e-4, convergence_check=False)
+
+        scheduler = self._get_1cycle_scheduler(n_batches)
+        self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
+
+        self.training_loss, self.testing_loss, self.num_epochs_trained = [],[],0
+        
+        anneal_fn = partial(self._get_KL_anneal_factor, n_epochs = self.num_epochs, 
+            n_batches_per_epoch = n_batches)
+
+        step_count = 0
+        self.anneal_factors = []
+        try:
+
+            t = trange(self.num_epochs+1, desc = 'Epoch 0', leave = True) if self.training_bar else range(self.num_epochs+1)
+            _t = iter(t)
+            epoch = 0
+            while True:
+                
+                try:
+                    next(_t)
+                except StopIteration:
+                    pass
+
+                self.train()
+                running_loss = 0.0
+                for batch in self._iterate_batches(endog_features = endog_features, exog_features = exog_features, 
+                        batch_size = self.batch_size, bar = False):
+                    
+                    anneal_factor = anneal_fn(step_count)
+                    self.anneal_factors.append(anneal_factor)
+                    #if batch[0].shape[0] > 1:
+                    try:
+                        running_loss += float(self.svi.step(**batch, anneal_factor = anneal_factor))
+                        step_count+=1
+                    except ValueError:
+                        raise ModelParamError('Gradient overflow caused parameter values that were too large to evaluate. Try setting a lower learning rate.')
+
+                    if epoch < self.num_epochs:
+                        scheduler.step()
+                
+                #epoch cleanup
+                epoch_loss = running_loss/(n_observations * self.num_exog_features)
+                self.training_loss.append(epoch_loss)
+                recent_losses = self.training_loss[-5:]
+
+                if self.training_bar:
+                    t.set_description("Epoch {} done. Recent losses: {}".format(
+                        str(epoch + 1),
+                        ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
+                    ))
+
+                epoch+=1
+                if early_stopper(recent_losses[-1]) and epoch > self.num_epochs:
+                    break
+
+        except KeyboardInterrupt:
+            logger.warn('Interrupted training.')
+
+        self.set_device('cpu')
+        self.eval()
         return self
 
-    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= add_topic_comps,
-        del_kwargs=['endog_features','exog_features'])
-    def predict(self, endog_features, exog_features, batch_size = 512):
+    @wraps_modelfunc(adata_extractor=fit_adata, 
+        del_kwargs=['features','highly_variable','endog_features','exog_features'])
+    def fit(self,*,features, highly_variable, endog_features, exog_features):
+        return self._fit(features = features, highly_variable = highly_variable, 
+            endog_features = endog_features, exog_features = exog_features)
+
+
+    def _run_encoder_fn(self, fn, batch_size = 512, bar = True, desc = 'Predicting latent vars', **features):
 
         assert(isinstance(batch_size, int) and batch_size > 0)
         
         self.eval()
         logger.debug('Predicting latent variables ...')
-        latent_vars = []
-        for batch in self._iterate_batches(
-                endog_features = endog_features, exog_features = exog_features, 
-                batch_size = batch_size, bar = True, training = False, desc = 'Predicting latent vars'):
-            latent_vars.append(self.encoder.latent_loc(*batch))
+        results = []
+        for batch in self._iterate_batches(**features,
+                batch_size = batch_size, bar = bar,  desc = desc):
+            results.append(fn(batch['endog_features'], batch['read_depth']))
 
-        theta = np.vstack(latent_vars)
-        return theta
+        results = np.vstack(results)
+        return results
+
+
+    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= add_topic_comps,
+        del_kwargs=['endog_features','exog_features'])
+    def predict(self, batch_size = 512, *,endog_features, exog_features):
+        return self._run_encoder_fn(self.encoder.topic_comps, batch_size = batch_size, 
+            endog_features = endog_features, exog_features = exog_features)
 
 
     @staticmethod
@@ -317,42 +449,76 @@ class BaseModel(nn.Module, BaseEstimator):
         x = (x**a - 1)/a
         return x - x.mean(-1, keepdims = True)
 
-    @wraps_modelfunc(adata_extractor=extract_features, adata_adder=add_umap_features,
-        del_kwargs=['endog_features','exog_features'])
-    def get_umap_features(self, endog_features, exog_features, batch_size = 512):
-        
-        compositions = self.predict(endog_features, exog_features, batch_size=batch_size)
-        basis = _gram_schmit_basis(compositions.shape[-1]).T
+    @staticmethod
+    def _gram_schmidt_basis(n):
+        basis = np.zeros((n, n-1))
+        for j in range(n-1):
+            i = j + 1
+            e = np.array([(1/i)]*i + [-1] +
+                        [0]*(n-i-1))*np.sqrt(i/(i+1))
+            basis[:, j] = e
+        return basis
 
+
+    def _project_to_orthospace(self, compositions):
+
+        basis = self._gram_schmidt_basis(compositions.shape[-1])
         return self.centered_boxcox_transform(compositions, 0.25).dot(basis)
+    
+
+    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= add_umap_features,
+        del_kwargs=['endog_features','exog_features'])
+    def get_umap_features(self,batch_size = 512, *,endog_features, exog_features):
+        
+        compositions = self._run_encoder_fn(self.encoder.topic_comps, endog_features = endog_features, exog_features = exog_features, batch_size=batch_size)
+        return self._project_to_orthospace(compositions)
 
 
-    def get_logp(self,*,endog_features, exog_features):
+    def _get_logp(self,*,endog_features, exog_features):
         pass
     
     @wraps_modelfunc(adata_extractor=extract_features, adata_adder= return_output,
         del_kwargs=['endog_features','exog_features'])
     def score(self,*,endog_features, exog_features):
         self.eval()
-        return self.get_logp(endog_features = endog_features, exog_features = exog_features)\
+        return self._get_logp(endog_features = endog_features, exog_features = exog_features)\
             /(endog_features.shape[0] * self.num_exog_features)
 
-    def _batched_impute(self, latent_composition, batch_size = 512, bar = True):
+    
+    def _run_decoder_fn(self, fn, latent_composition, batch_size = 512, bar = True, desc = 'Imputing features'):
 
         assert(isinstance(batch_size, int) and batch_size > 0)
         
         self.eval()
-        logger.debug('Predicting latent variables ...')
-        
-        for start, end in self._iterate_batch_idx(latent_composition.shape[-1], bar = bar, desc = 'Imputing'):
-            yield self.decoder(
-                torch.tensor(latent_composition[start : end], requires_grad = False).to(self.device)
-            )
+        logger.info('Predicting latent variables ...')
 
-    @wraps_modelfunc(adata_extractor=get_obsm, adata_adder=add_imputed_vals,
-        del_kwargs=['latent_compositions'])
-    def impute(self, latent_composition, batch_size = 512, bar = True):
-        return np.vstack(list(self._batched_impute(self, latent_composition, batch_size = batch_size, bar = bar)))
+        for start, end in self._iterate_batch_idx(latent_composition.shape[0], batch_size = batch_size, bar = bar, desc = desc):
+            yield fn(
+                    torch.tensor(latent_composition[start : end], requires_grad = False).to(self.device)
+                ).detach().cpu().numpy()
+
+
+    def _batched_impute(self, latent_composition, batch_size = 512, bar = True):
+
+        return self._run_decoder_fn(self.decoder, latent_composition, 
+                    batch_size= batch_size, bar = bar)
+        
+
+    @wraps_modelfunc(adata_extractor=get_topic_comps, adata_adder=add_imputed_vals,
+        del_kwargs=['topic_compositions'])
+    def impute(self, batch_size = 512, bar = True, *, topic_compositions):
+        return np.vstack([
+            x for x  in self._batched_impute(topic_compositions, batch_size = batch_size, bar = bar)
+        ])
+
+
+    @wraps_modelfunc(adata_extractor = get_topic_comps, adata_adder = partial(add_obs_col, colname = 'softmax_denom'), 
+        del_kwargs = ['topic_compositions'])
+    def _get_softmax_denom(self, topic_compositions, batch_size = 512, bar = True):
+        return np.concatenate([
+            x for x in self._run_decoder_fn(self.decoder.get_softmax_denom, topic_compositions, 
+                        batch_size = batch_size, bar = bar, desc = 'Calculating softmax summary data')
+        ])
 
     def _to_tensor(self, val):
         return torch.tensor(val).to(self.device)
@@ -360,17 +526,33 @@ class BaseModel(nn.Module, BaseEstimator):
     def _get_save_data(self):
         return dict(
             weights = self.state_dict(),
-            params = self.get_params()
+            params = self.get_params(),
+            fit_params = dict(
+                num_endog_features = self.num_endog_features,
+                num_exog_features = self.num_exog_features,
+                highly_variable = self.highly_variable,
+                features = self.features,
+                enrichments = self.enrichments,
+            )
         )
 
-    def _set_weights(self, weights):
+    def save(self, filename):
+        torch.save(self._get_save_data(), filename)
+
+    def _set_weights(self, fit_params, weights):
+
+        for param, value in fit_params.items():
+            setattr(self, param, value)
+        
+        self._get_weights(on_gpu = False)
+
         self.load_state_dict(weights)
         self.eval()
         self.to_cpu()
         return self
 
     def _score_features(self):
-        score = np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var() + self.bn.epsilon)
+        score = np.sign(self._get_gamma()) * (self._get_beta() - self._get_bn_mean())/np.sqrt(self._get_bn_var() + self.decoder.bn.eps)
         return score
 
     def _get_topics(self):
@@ -398,6 +580,10 @@ class BaseModel(nn.Module, BaseEstimator):
         self.set_device('cpu')
 
     def set_device(self, device):
-        logger.debug('Moving model to device: {}'.format(device))
+        logger.info('Moving model to device: {}'.format(device))
         self.device = device
         self = self.to(self.device)
+
+    @property
+    def topic_cols(self):
+        return ['topic_' + str(i) for i in range(self.num_topics)]
