@@ -49,7 +49,6 @@ class CisModeler:
                 )
             )
 
-
     @property
     def genes(self):
         return self.features
@@ -101,6 +100,16 @@ class CisModeler:
         return features
 
 
+    def save(self, prefix):
+        for model in self.models:
+            model.save(prefix)
+
+
+    def load(self, prefix):
+        for model in self.models:
+            model.load(prefix)
+
+
     @wraps_rp_func()
     def fit(self, model, features):
         return model.fit(features)
@@ -147,6 +156,7 @@ class GeneCisModel:
     def RP(self, weights, distances, d):
         return (weights * torch.pow(0.5, distances/(1e3 * d))).sum(-1)
 
+
     def model(self, 
         gene_expr, 
         softmax_denom,
@@ -170,29 +180,34 @@ class GeneCisModel:
             gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
             bias = pyro.sample('bias', dist.Normal(0, 5.))
 
+            with pyro.plate('trans_coefs', trans_features.shape[-1]):
+                a_trans = pyro.sample('a_trans', dist.Normal(0.,1.))
+
             with pyro.plate('data', len(upstream_weights)):
 
                 f_Z = a[0] * self.RP(upstream_weights, upstream_distances, d[0])\
                     + a[1] * self.RP(downstream_weights, downstream_distances, d[1]) \
                     + a[2] * promoter_weights.sum(-1)
 
-                pyro.deterministic('f_Z', f_Z)
+                if self.use_trans_features:
+                    f_Z = f_Z + torch.matmul(trans_features, torch.unsqueeze(a_trans, 0).T).reshape(-1)
+
                 prediction = self.bn(f_Z.reshape((-1,1)).float()).reshape(-1)
-        
                 independent_rate = (gamma * prediction + bias).exp()
 
                 rate =  independent_rate/softmax_denom
+                pyro.deterministic('prediction', rate)
                 mu = read_depth.exp() * rate
 
                 p = mu / (mu + theta)
 
+                pyro.deterministic('prob_success', p)
                 NB = dist.NegativeBinomial(total_count = theta, probs = p)
                 pyro.sample('obs', NB, obs = gene_expr)
 
 
     def _t(self, X):
         return torch.tensor(X, requires_grad=False)
-
 
     @staticmethod
     def get_loss_fn():
@@ -214,7 +229,6 @@ class GeneCisModel:
         grads = optimizer._gather_flat_grad()
 
         return loss, grads
-
 
     def armijo_step(self, optimizer, features, update_curvature = True):
 
@@ -242,7 +256,6 @@ class GeneCisModel:
             optimizer.curvature_update(grad, eps=0.2, damping=True)
 
         return obj_loss.item()
-
 
     def fit(self, features):
         
@@ -278,18 +291,76 @@ class GeneCisModel:
 
             return self
 
+    def get_normalized_params(self):
+        model_params = {}
+        for k, v in self.guide().items():
+            v = v.detach()
+            if len(v.size()) > 0:
+                v = list(map(float, np.squeeze(v.numpy())))
+            else:
+                v = float(v)
+            k = k.split('/')[-1].strip(self.gene)
+            model_params[k]=v
+            
+        return model_params
+
+    def get_posterior_sample(self, features, site):
+
+        features = {k : self._t(v) for k, v in features.items()}
+
+        self.bn.eval()
+        
+        guide_trace = poutine.trace(self.guide).get_trace(**features)
+        model_trace = poutine.trace(poutine.replay(self.model, guide_trace))\
+            .get_trace(**features)
+
+        return model_trace.nodes[self.prefix + '/' + site]['value']
+
+    @property
+    def prefix(self):
+        return self.get_prefix()
+
+
     def predict(self, features):
-        pass
+        return self.to_numpy(self.get_posterior_sample(features, 'prediction'))[:, np.newaxis]
+
 
     def score(self, features):
-        pass
+        return self.get_logp(features).sum()
+
 
     def get_logp(self, features):
-        pass
+
+        features = {k : self._t(v) for k, v in features.items()}
+
+        p = self.get_posterior_sample(features, 'prob_success')
+        theta = self.guide()[self.prefix + '/theta']
+
+        logp = dist.NegativeBinomial(total_count = theta, probs = p).log_prob(features['gene_expr'])
+        return self.to_numpy(logp)[:, np.newaxis]
+        
 
     def prob_isd(self, features):
         pass
 
     @staticmethod
     def to_numpy(X):
-        return X.detach().cpu().numpy()
+        return X.clone().detach().cpu().numpy()
+
+    def get_savename(self, prefix):
+        return prefix + self.prefix + '.pth'
+
+    def _get_save_data(self):
+        return dict(bn = self.bn.state_dict(), guide = self.guide)
+
+    def _load_save_data(self, state):
+        self._get_weights()
+        self.bn.load_state_dict(state['bn'])
+        self.guide = state['guide']
+
+    def save(self, prefix):
+        torch.save(self._get_save_data(), self.get_savename(prefix))
+
+    def load(self, prefix):
+        state = torch.load(self.get_savename(prefix))
+        self._load_save_data(state)

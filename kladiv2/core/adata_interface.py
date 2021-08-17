@@ -362,7 +362,7 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
 
                 gene_name = model.gene
                 try:
-                    gene_idx = np.argwhere(atac_adata.uns['distance_to_TSS_genes'] == gene_name)[0,0]
+                    gene_idx = np.argwhere(np.array(atac_adata.uns['distance_to_TSS_genes']) == gene_name)[0,0]
                 except IndexError:
                     raise IndexError('Gene {} does not appear in peak annotation'.format(gene_name))
 
