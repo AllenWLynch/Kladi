@@ -18,7 +18,8 @@ from sklearn.base import BaseEstimator
 from kladiv2.topic_model.base import EarlyStopping
 from kladiv2.core.adata_interface import *
 import warnings
-from kladiv2.cis_model.optim import SdLBFGS0
+from kladiv2.cis_model.optim import LBFGS as stochastic_LBFGS
+import torch.nn.functional as F
 
 
 class CisModeler:
@@ -163,7 +164,7 @@ class GeneCisModel:
                 a = pyro.sample("a", dist.HalfNormal(1.))
 
             with pyro.plate("upstream-downstream", 2):
-                d = pyro.sample('logdistance', dist.LogNormal(np.e, 1.))
+                d = pyro.sample('logdistance', dist.LogNormal(np.log(10), 1.))
 
             theta = pyro.sample('theta', dist.Gamma(2., 0.5))
             gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
@@ -198,7 +199,50 @@ class GeneCisModel:
         return TraceMeanField_ELBO().differentiable_loss
 
     def get_optimizer(self, params):
-        return torch.optim.LBFGS(params, lr=self.learning_rate, line_search_fn = 'strong_wolfe')
+        #return torch.optim.LBFGS(params, lr=self.learning_rate, line_search_fn = 'strong_wolfe')
+        return stochastic_LBFGS(params, lr = self.learning_rate, history_size = 20,
+            line_search = 'Armijo')
+
+
+    def get_loss_and_grads(self, optimizer, features):
+        
+        optimizer.zero_grad()
+
+        loss = self.get_loss_fn()(self.model, self.guide, **features)
+        loss.backward()
+
+        grads = optimizer._gather_flat_grad()
+
+        return loss, grads
+
+
+    def armijo_step(self, optimizer, features, update_curvature = True):
+
+        def closure():
+            optimizer.zero_grad()
+            loss = self.get_loss_fn()(self.model, self.guide, **features)
+            return loss
+
+        obj_loss, grad = self.get_loss_and_grads(optimizer, features)
+
+        # compute initial gradient and objective
+        p = optimizer.two_loop_recursion(-grad)
+        p/=torch.norm(p)
+    
+        # perform line search step
+        options = {'closure': closure, 'current_loss': obj_loss, 'interpolate': True}
+        obj_loss, lr, _, _, _, _ = optimizer.step(p, grad, options=options)
+
+        # compute gradient
+        obj_loss.backward()
+        grad = optimizer._gather_flat_grad()
+
+        # curvature update
+        if update_curvature:
+            optimizer.curvature_update(grad, eps=0.2, damping=True)
+
+        return obj_loss.item()
+
 
     def fit(self, features):
         
@@ -216,22 +260,20 @@ class GeneCisModel:
                 loss = loss_fn(self.model, self.guide, **features)
 
             params = {site["value"].unconstrained() for site in param_capture.trace.nodes.values()}
-            optimizer = self.get_optimizer(params)#SdLBFGS0(params, lr = self.learning_rate)#torch.optim.LBFGS(params, lr=self.learning_rate)
-            early_stopper = EarlyStopping(patience = 1, tolerance = 1e-3)
+            optimizer = self.get_optimizer(params)
+            early_stopper = EarlyStopping(patience = 3, tolerance = 1e-4)
+            update_curvature = False
 
-            def closure():
-                optimizer.zero_grad()
-                loss = loss_fn(self.model, self.guide, **features)
-                loss.backward()
-                return loss
+            self.loss = []
+            self.bn.train()
+            for i in range(50):
 
-            self.testing_loss = []
-            for iternum in range(20):
-                self.testing_loss.append(
-                    self.to_numpy(optimizer.step(closure))/N
+                self.loss.append(
+                    self.armijo_step(optimizer, features, update_curvature = update_curvature)/N
                 )
+                update_curvature = not update_curvature
 
-                if early_stopper(self.testing_loss[-1]):
+                if early_stopper(self.loss[-1]):
                     break
 
             return self

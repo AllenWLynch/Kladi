@@ -260,7 +260,7 @@ class PalantirTrajectoryInference:
             pseudotime = new_traj
             iteration += 1
 
-        self.pseudotime = minmax_scale(pseudotime) #make 0 minimum
+        self.pseudotime = pseudotime - pseudotime.min() #make 0 minimum
         self.waypoint_weights = W
 
         if len(terminal_states) > 0:
@@ -301,7 +301,9 @@ class PalantirTrajectoryInference:
 
         # Remove edges that move backwards in pseudotime except for edges that are within
         # the computed standard deviation
-        rem_edges = np.argwhere((waypoint_pseudotime[:, np.newaxis] - waypoint_pseudotime[ind]) > adaptive_std[:, np.newaxis])
+        delta_pseudotime = (waypoint_pseudotime[:, np.newaxis] - waypoint_pseudotime[ind])
+
+        rem_edges = np.argwhere( delta_pseudotime > adaptive_std[:, np.newaxis] )
         x = rem_edges[:,0]
         y = rem_edges[:,1]
 
@@ -315,11 +317,16 @@ class PalantirTrajectoryInference:
         # Markov chain construction
         kNN, adaptive_std = self.get_directed_knn_graph()
 
+        waypoint_pseudotime = self.pseudotime[self.waypoints]
+
         # Affinity matrix and markov chain
         i,j,d = sparse.find(kNN)
+        
+        delta_pseudotime = np.abs(waypoint_pseudotime[j] - waypoint_pseudotime[i])
+        
         affinity = np.exp(
-            -(d ** 2) / (adaptive_std[i] ** 2) * 0.5
-            - (d ** 2) / (adaptive_std[j] ** 2) * 0.5
+            -(d ** 2) / (adaptive_std[i] * delta_pseudotime) * 0.5
+            -(d ** 2) / (adaptive_std[j] * delta_pseudotime) * 0.5
         )
         affinity_matrix = sparse.csr_matrix((affinity, (i, j)), [len(self.waypoints), len(self.waypoints)])
 
@@ -450,10 +457,11 @@ class PalantirTrajectoryInference:
                     l1 = lineages[:, i].copy()
                     l2 = lineages[:, j].copy()
                     
-                    branch_time = max(self._get_lineage_branch_time(l1, l2, 
-                        self.pseudotime, earliness_shift = earliness_shift),
+                    branch_time = self._get_lineage_branch_time(l1, l2, 
+                        self.pseudotime, earliness_shift = earliness_shift) +\
                         self._get_lineage_branch_time(l2, l1, 
-                            self.pseudotime, earliness_shift = earliness_shift))
+                            self.pseudotime, earliness_shift = earliness_shift)
+                    branch_time/=2
 
                     split_time_matrix[i,j] = branch_time
 
