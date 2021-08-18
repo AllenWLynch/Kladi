@@ -385,15 +385,17 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
 
                 model_features.pop('promoter_distances')
                 
-                results.append(func(self, model, 
+                results.append(func(
+                        self, model, 
                         self._get_features_for_model(
                             gene_expr = gene_expr,
                             read_depth = read_depth,
                             expr_softmax_denom = expr_softmax_denom,
                             trans_features = trans_features,
                             atac_softmax_denom = atac_softmax_denom,
-                            **model_features)
-                    ), **kwargs)
+                            **model_features),
+                        **kwargs)
+                )
 
             return adata_adder(self, expr_adata, atac_adata, results)
 

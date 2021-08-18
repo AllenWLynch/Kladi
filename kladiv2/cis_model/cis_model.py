@@ -23,6 +23,15 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
+class SaveCallback:
+
+    def __init__(self, prefix):
+        self.prefix = prefix
+
+    def __call__(self, model):
+        if model.was_fit:
+            model.save(self.prefix)
+
 class CisModeler:
 
     def __init__(self,*,
@@ -118,12 +127,16 @@ class CisModeler:
         return self
 
     @wraps_rp_func(lambda self, expr_adata, atac_data, output : self.subset_fit_models(output))
-    def fit(self, model, features):
+    def fit(self, model, features, callback = None):
         try:
             model.fit(features)
         except ValueError:
             logger.warn('{} model failed to fit.'.format(model.gene))
             pass
+
+        if not callback is None:
+            callback(model)
+
         return model.was_fit
 
     @wraps_rp_func(lambda self, expr_adata, atac_data, output : np.array(output).sum())
@@ -295,7 +308,7 @@ class GeneCisModel:
             for i in range(50):
 
                 self.loss.append(
-                    self.armijo_step(optimizer, features, update_curvature = update_curvature)/N
+                    float(self.armijo_step(optimizer, features, update_curvature = update_curvature)/N)
                 )
                 update_curvature = not update_curvature
 
