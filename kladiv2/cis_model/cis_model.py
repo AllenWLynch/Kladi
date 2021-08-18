@@ -20,6 +20,7 @@ from kladiv2.core.adata_interface import *
 import warnings
 from kladiv2.cis_model.optim import LBFGS as stochastic_LBFGS
 import torch.nn.functional as F
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ class CisModeler:
         if not callback is None:
             callback(model)
 
+        gc.collect()
         return model.was_fit
 
     @wraps_rp_func(lambda self, expr_adata, atac_data, output : np.array(output).sum())
