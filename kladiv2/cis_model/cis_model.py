@@ -327,7 +327,7 @@ class GeneCisModel:
 
         del optimizer
         del features
-        #del self.guide
+        del self.guide
 
         return self
 
