@@ -312,7 +312,7 @@ def add_peak_gene_distances(self, adata, output):
     adata.uns['distance_to_TSS_genes'] = list(genes)
 
 
-def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : None):
+def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : None, bar_desc = ''):
 
     def wrap_fn(func):
 
@@ -358,7 +358,7 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
             distance_matrix = atac_adata.varm['distance_to_TSS'].T #genes, #regions
 
             results = []
-            for model in tqdm(self.models, desc = 'Fitting models'):
+            for model in tqdm(self.models, desc = bar_desc):
 
                 gene_name = model.gene
                 try:

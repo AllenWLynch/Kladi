@@ -6,7 +6,7 @@ import pyro
 import pyro.distributions as dist
 from pyro.infer.autoguide import AutoDelta
 from pyro.infer import SVI, TraceMeanField_ELBO, Predictive
-from pyro.infer.autoguide.initialization import init_to_mean
+from pyro.infer.autoguide.initialization import init_to_mean, init_to_value
 from pyro import poutine
 import numpy as np
 import torch.distributions.constraints as constraints
@@ -128,7 +128,7 @@ class CisModeler:
         self.models = [model for fit, model in zip(was_fit, self.models) if fit]
         return self
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output : self.subset_fit_models(output))
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output : self.subset_fit_models(output), bar_desc = 'Fitting models')
     def fit(self, model, features, callback = None):
         try:
             model.fit(features)
@@ -139,25 +139,29 @@ class CisModeler:
         if not callback is None:
             callback(model)
 
-        gc.collect()
         return model.was_fit
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output : np.array(output).sum())
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output : np.array(output).sum(), bar_desc = 'Scoring')
     def score(self, model, features):
         return model.score(features)
 
     @wraps_rp_func(lambda self, expr_adata, atac_data, output: \
-        add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_prediction'))
+        add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_prediction'), bar_desc = 'Predicting expression')
     def predict(self, model, features):
         return model.predict(features)
 
     @wraps_rp_func(lambda self, expr_adata, atac_data, output: \
-        add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_logp'))
+        add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_logp'), bar_desc = 'Getting logp(Data)')
     def get_logp(self, model, features):
         return model.get_logp(features)
 
-    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output)
-    def test(self, model,features):
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output: \
+        add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_samples'))
+    def _sample_posterior(self, model, features, site = 'prediction'):
+        return model.to_numpy(model.get_posterior_sample(features, site))[:, np.newaxis]
+
+    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, bar_desc = 'Formatting features')
+    def get_features(self, model,features):
         return features
     
 
@@ -209,8 +213,9 @@ class GeneCisModel:
             gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
             bias = pyro.sample('bias', dist.Normal(0, 5.))
 
-            with pyro.plate('trans_coefs', trans_features.shape[-1]):
-                a_trans = pyro.sample('a_trans', dist.Normal(0.,1.))
+            if self.use_trans_features:
+                with pyro.plate('trans_coefs', trans_features.shape[-1]):
+                    a_trans = pyro.sample('a_trans', dist.Normal(0.,1.))
 
             with pyro.plate('data', len(upstream_weights)):
 
@@ -222,6 +227,7 @@ class GeneCisModel:
                     f_Z = f_Z + torch.matmul(trans_features, torch.unsqueeze(a_trans, 0).T).reshape(-1)
 
                 prediction = self.bn(f_Z.reshape((-1,1)).float()).reshape(-1)
+                pyro.deterministic('unnormalized_prediction', prediction)
                 independent_rate = (gamma * prediction + bias).exp()
 
                 rate =  independent_rate/softmax_denom
@@ -244,7 +250,7 @@ class GeneCisModel:
 
     def get_optimizer(self, params):
         #return torch.optim.LBFGS(params, lr=self.learning_rate, line_search_fn = 'strong_wolfe')
-        return stochastic_LBFGS(params, lr = self.learning_rate, history_size = 20,
+        return stochastic_LBFGS(params, lr = self.learning_rate, history_size = 5,
             line_search = 'Armijo')
 
 
@@ -284,7 +290,7 @@ class GeneCisModel:
         if update_curvature:
             optimizer.curvature_update(grad, eps=0.2, damping=True)
 
-        return obj_loss.item()
+        return obj_loss.detach().item()
 
     def fit(self, features):
 
@@ -293,13 +299,11 @@ class GeneCisModel:
         self._get_weights()
         N = len(features['upstream_weights'])
 
-        loss_fn = self.get_loss_fn()
-
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
             with poutine.trace(param_only=True) as param_capture:
-                loss = loss_fn(self.model, self.guide, **features)
+                loss = self.get_loss_fn()(self.model, self.guide, **features)
 
             params = {site["value"].unconstrained() for site in param_capture.trace.nodes.values()}
             optimizer = self.get_optimizer(params)
@@ -308,7 +312,7 @@ class GeneCisModel:
 
             self.loss = []
             self.bn.train()
-            for i in range(50):
+            for i in range(100):
 
                 self.loss.append(
                     float(self.armijo_step(optimizer, features, update_curvature = update_curvature)/N)
@@ -319,29 +323,23 @@ class GeneCisModel:
                     break
 
         self.was_fit = True
+        self.posterior_map = self.guide()
+
+        del optimizer
+        del features
+        #del self.guide
 
         return self
 
-    def get_normalized_params(self):
-        model_params = {}
-        for k, v in self.guide().items():
-            v = v.detach()
-            if len(v.size()) > 0:
-                v = list(map(float, np.squeeze(v.numpy())))
-            else:
-                v = float(v)
-            k = k.split('/')[-1].strip(self.gene)
-            model_params[k]=v
-            
-        return model_params
 
     def get_posterior_sample(self, features, site):
 
         features = {k : self._t(v) for k, v in features.items()}
-
         self.bn.eval()
-        
-        guide_trace = poutine.trace(self.guide).get_trace(**features)
+
+        guide = AutoDelta(self.model, init_loc_fn = init_to_value(values = self.posterior_map))
+        guide_trace = poutine.trace(guide).get_trace(**features)
+        #print(guide_trace)
         model_trace = poutine.trace(poutine.replay(self.model, guide_trace))\
             .get_trace(**features)
 
@@ -365,7 +363,7 @@ class GeneCisModel:
         features = {k : self._t(v) for k, v in features.items()}
 
         p = self.get_posterior_sample(features, 'prob_success')
-        theta = self.guide()[self.prefix + '/theta']
+        theta = self.posterior_map[self.prefix + '/theta']
 
         logp = dist.NegativeBinomial(total_count = theta, probs = p).log_prob(features['gene_expr'])
         return self.to_numpy(logp)[:, np.newaxis]
@@ -382,12 +380,12 @@ class GeneCisModel:
         return prefix + self.prefix + '.pth'
 
     def _get_save_data(self):
-        return dict(bn = self.bn.state_dict(), guide = self.guide)
+        return dict(bn = self.bn.state_dict(), guide = self.posterior_map)
 
     def _load_save_data(self, state):
         self._get_weights()
         self.bn.load_state_dict(state['bn'])
-        self.guide = state['guide']
+        self.posterior_map = state['guide']
 
     def save(self, prefix):
         torch.save(self._get_save_data(), self.get_savename(prefix))
@@ -395,7 +393,6 @@ class GeneCisModel:
     def load(self, prefix):
         state = torch.load(self.get_savename(prefix))
         self._load_save_data(state)
-
 
 
 def main(*,atac_adata, rna_adata, expr_model, accessibility_model, genes, save_prefix,
