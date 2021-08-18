@@ -21,6 +21,7 @@ import warnings
 from kladiv2.cis_model.optim import LBFGS as stochastic_LBFGS
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
 
 class CisModeler:
 
@@ -35,7 +36,6 @@ class CisModeler:
         self.expr_model = expr_model
         self.accessibility_model = accessibility_model
         self.learning_rate = learning_rate
-        self.features = genes
         self.use_trans_features = use_trans_features
         self.counts_layer = counts_layer
 
@@ -51,7 +51,11 @@ class CisModeler:
 
     @property
     def genes(self):
-        return self.features
+        return [model.gene for model in self.models]
+
+    @property
+    def features(self):
+        return self.genes
 
     @property
     def model_type(self):
@@ -109,10 +113,18 @@ class CisModeler:
         for model in self.models:
             model.load(prefix)
 
+    def subset_fit_models(self, was_fit):
+        self.models = [model for fit, model in zip(was_fit, self.models) if fit]
+        return self
 
-    @wraps_rp_func()
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output : self.subset_fit_models(output))
     def fit(self, model, features):
-        return model.fit(features)
+        try:
+            model.fit(features)
+        except ValueError:
+            logger.warn('{} model failed to fit.'.format(model.gene))
+            pass
+        return model.was_fit
 
     @wraps_rp_func(lambda self, expr_adata, atac_data, output : np.array(output).sum())
     def score(self, model, features):
@@ -143,6 +155,7 @@ class GeneCisModel:
         self.gene = gene
         self.learning_rate = learning_rate
         self.use_trans_features = use_trans_features
+        self.was_fit = False
 
     def _get_weights(self):
         pyro.clear_param_store()
@@ -258,7 +271,7 @@ class GeneCisModel:
         return obj_loss.item()
 
     def fit(self, features):
-        
+
         features = {k : self._t(v) for k, v in features.items()}
 
         self._get_weights()
@@ -289,7 +302,9 @@ class GeneCisModel:
                 if early_stopper(self.loss[-1]):
                     break
 
-            return self
+        self.was_fit = True
+
+        return self
 
     def get_normalized_params(self):
         model_params = {}
