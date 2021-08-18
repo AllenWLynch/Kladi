@@ -21,6 +21,7 @@ import warnings
 from kladiv2.cis_model.optim import LBFGS as stochastic_LBFGS
 import torch.nn.functional as F
 import gc
+import argparse
 
 logger = logging.getLogger(__name__)
 
@@ -394,3 +395,51 @@ class GeneCisModel:
     def load(self, prefix):
         state = torch.load(self.get_savename(prefix))
         self._load_save_data(state)
+
+
+
+def main(*,atac_adata, rna_adata, expr_model, accessibility_model, genes, save_prefix,
+            learning_rate = 1., gene_start_idx = 0, use_trans_features = False):
+
+    from kladiv2.topic_model.expression_model import ExpressionModel
+    from kladiv2.topic_model.accessibility_model import AccessibilityModel
+    import anndata
+
+    atac_data = anndata.read_h5ad(atac_adata)
+    rna_data = anndata.read_h5ad(rna_adata)
+    rna_model = ExpressionModel.load(expr_model)
+    atac_model = AccessibilityModel.load(accessibility_model)
+
+    with open(genes, 'r') as f:
+        genes = [x.strip() for x in f.readlines()]
+
+    cis_model = CisModeler(expr_model=rna_model, accessibility_model=atac_model,
+                      learning_rate=learning_rate, use_trans_features=use_trans_features, genes= genes[gene_start_idx:])
+
+    cis_model.fit(expr_adata=rna_data, atac_adata=atac_data, callback = 
+                SaveCallback(save_prefix))
+
+
+'''if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser('Train RP Models')
+    parser.add_argument('--rna_adata', type = str)
+    parser.add_argument('--atac_adata', type = str)
+    parser.add_argument('--atac_model', type = str)
+    parser.add_argument('--rna_model', type = str)
+    parser.add_argument('--genes', type = str)
+    parser.add_argument('--learning_rate', type = float, default=1.)
+    parser.add_argument('--gene_start_idx', type = int, default= 0)
+    parser.add_argument('--save_prefix', type = str)
+
+    args = parser.parse_args()
+
+    main(
+        atac_adata = args.atac_adata, rna_adata = args.rna_adata, 
+        expr_model = args.rna_model, accessibility_model = args.atac_model,
+        genes = args.genes, learning_rate = args.learning_rate, 
+        gene_start_idx = args.gene_start_idx, save_prefix = args.save_prefix
+    )
+'''
+
+
