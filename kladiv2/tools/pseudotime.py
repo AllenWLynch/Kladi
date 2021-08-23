@@ -9,6 +9,11 @@ from joblib import Parallel, delayed
 from scipy.sparse import csgraph
 from scipy.stats import entropy, pearsonr, norm
 from copy import deepcopy
+from scipy.sparse.linalg import eigs
+import logging
+import tqdm
+
+logger = logging.getLogger(__name__)
 
 ## ___ TREE DATATYPE FUNCTIONS ###
 
@@ -66,99 +71,6 @@ def get_dendogram_levels(G):
 
 ### ___ PALANTIR FUNCTIONS ____ ##
 
-def get_pseudotime(n_waypoints = 3000, max_iterations = 25, n_neighbors = 30, n_jobs = 1,
-        *, start_cell, diffmap, **terminal_cells):
-
-    assert(isinstance(max_iterations, int) and max_iterations > 0)
-    n_waypoints= min(len(diffmap), n_waypoints)
-    lineage_names, termin_cells = list(zip(*sorted(terminal_cells.items(), key = lambda x : x[1])))
-
-    waypoints = sample_waypoints(n_waypoints = n_waypoints, diffmap = diffmap)
-    waypoints = np.array(list(set([*waypoints, start_cell, *terminal_cells])))
-
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors, metric="euclidean", n_jobs=n_jobs).fit(diffmap)
-    distance_matrix = nbrs.kneighbors_graph(diffmap, mode="distance")
-
-    ####
-
-
-    
-    # CHECK FOR GRAPH CONNECTION!
-
-
-    ###
-
-    # Distances
-    dists = Parallel(n_jobs=n_jobs, max_nbytes=None)(
-        delayed(csgraph.dijkstra)(distance_matrix, False, cell)
-        for cell in waypoints
-    )
-
-    # Convert to distance matrix
-    D = np.vstack([d[np.newaxis, :] for d in dists])
-
-    start_waypoint_idx = np.argwhere(waypoints == start_cell)[0]
-
-    # Determine the perspective matrix
-    # Waypoint weights
-    sdv = np.std(np.ravel(D)) * 1.06 * len(np.ravel(D)) ** (-1 / 5)
-    W = np.exp(-0.5 * np.power((D / sdv), 2))
-    # Stochastize the matrix
-    W = W / W.sum(0)
-
-    # Initalize pseudotime to start cell distances
-    pseudotime = D[start_waypoint_idx, :].reshape(-1)
-    converged = False
-
-    # Iteratively update perspective and determine pseudotime
-    iteration = 1
-    while not converged and iteration < max_iterations:
-        # Perspective matrix by alinging to start distances
-        P = deepcopy(D)
-        for i, waypoint_idx in enumerate(waypoints):
-            # Position of waypoints relative to start
-            if waypoint_idx != start_cell:
-                idx_val = pseudotime[waypoint_idx]
-
-                # Convert all cells before starting point to the negative
-                before_indices = pseudotime < idx_val
-                P[i, before_indices] = -D[i, before_indices]
-
-                # Align to start
-                P[i, :] = P[i, :] + idx_val
-
-        # Weighted pseudotime
-        new_traj = np.multiply(P,W).sum(0)
-        # Check for convergence
-        corr = pearsonr(pseudotime, new_traj)[0]
-        if corr > 0.9999:
-            converged = True
-
-        # If not converged, continue iteration
-        pseudotime = new_traj
-        iteration += 1
-
-    pseudotime = pseudotime - pseudotime.min() #make 0 minimum
-    waypoint_weights = W
-    
-    return dict(
-        pseudotime = pseudotime, 
-        waypoints = waypoints, 
-        waypoint_weights = waypoint_weights, 
-        lineage_names = lineage_names, 
-        terminal_cells = terminal_cells, 
-        start_cell = start_cell,
-        n_neighbors = n_neighbors,
-        n_jobs = n_jobs,
-    )
-
-
-def make_markov_matrix(affinity_matrix):
-    inverse_rowsums = sparse.diags(1/np.array(affinity_matrix.sum(axis = 1)).reshape(-1)).tocsr()
-    markov_matrix = inverse_rowsums.dot(affinity_matrix)
-    return markov_matrix
-
-
 def sample_waypoints(num_waypoints = 3000,*, diffmap):
 
     waypoint_set = list()
@@ -194,225 +106,329 @@ def sample_waypoints(num_waypoints = 3000,*, diffmap):
     return waypoints
 
 
-def get_directed_knn_graph(n_neighbors = 30, n_jobs = 1,*, diffmap, pseudotime):
+def get_pseudotime(max_iterations = 25, n_jobs = -1,*, start_cell, distance_matrix):
 
-    # kNN graph
-    nbrs = NearestNeighbors(
-        n_neighbors=n_neighbors, metric="euclidean", n_jobs=n_jobs
-    ).fit(diffmap)
-    kNN = nbrs.kneighbors_graph(diffmap, mode="distance")
-    dist, ind = nbrs.kneighbors(diffmap)
+    assert(isinstance(max_iterations, int) and max_iterations > 0)
+    N = distance_matrix.shape[0]
+    cells = np.arange(N)
 
-    # Standard deviation allowing for "back" edges
-    adpative_k = np.min([int(np.floor(n_neighbors / 3)) - 1, 30])
-    adaptive_std = np.ravel(dist[:, adpative_k])
+    ####
 
-    # Remove edges that move backwards in pseudotime except for edges that are within
-    # the computed standard deviation
-    delta_pseudotime = (pseudotime[:, np.newaxis] - pseudotime[ind])
 
-    rem_edges = np.argwhere( delta_pseudotime > adaptive_std[:, np.newaxis] )
-    x = rem_edges[:,0]
-    y = rem_edges[:,1]
-
-    # Update adjacecy matrix    
-    kNN[x, ind[x,y]] = np.inf
-
-    return kNN, adaptive_std
-
-def construct_directed_chain(n_neighbors = 30, n_jobs = 1, *, diffmap, pseudotime):
-
-    # Markov chain construction
-    kNN, adaptive_std = get_directed_knn_graph(n_neighbors = n_neighbors, n_jobs = n_jobs,
-        diffmap = diffmap, pseudotime = pseudotime)
-
-    # Affinity matrix and markov chain
-    i,j,d = sparse.find(kNN)
     
-    delta_pseudotime = np.abs(pseudotime[j] - pseudotime[i])
+    # CHECK FOR GRAPH CONNECTION!
+
+
+    ###
+
+    # Distances
+    dists = Parallel(n_jobs=n_jobs, max_nbytes=None)(
+        delayed(csgraph.dijkstra)(distance_matrix, False, cell)
+        for cell in cells
+    )
+
+    # Convert to distance matrix
+    D = np.vstack([d[np.newaxis, :] for d in dists])
+
+    start_waypoint_idx = np.argwhere(cells == start_cell)[0]
+
+    # Determine the perspective matrix
+    # Waypoint weights
+    sdv = np.std(np.ravel(D)) * 1.06 * len(np.ravel(D)) ** (-1 / 5)
+    W = np.exp(-0.5 * np.power((D / sdv), 2))
+    # Stochastize the matrix
+    W = W / W.sum(0)
+
+    # Initalize pseudotime to start cell distances
+    pseudotime = D[start_waypoint_idx, :].reshape(-1)
+    converged = False
+
+    # Iteratively update perspective and determine pseudotime
+    for iteration in range(max_iterations):
+        # Perspective matrix by alinging to start distances
+        P = deepcopy(D)
+        for i, waypoint_idx in enumerate(cells):
+            # Position of waypoints relative to start
+            if waypoint_idx != start_cell:
+                idx_val = pseudotime[waypoint_idx]
+
+                # Convert all cells before starting point to the negative
+                before_indices = pseudotime < idx_val
+                P[i, before_indices] = -D[i, before_indices]
+
+                # Align to start
+                P[i, :] = P[i, :] + idx_val
+
+        # Weighted pseudotime
+        new_traj = np.multiply(P,W).sum(0)
+        # Check for convergence
+        corr = pearsonr(pseudotime, new_traj)[0]
+        if corr > 0.9999:
+            converged = True
+
+        # If not converged, continue iteration
+        pseudotime = new_traj
+
+        if converged:
+            break
+
+    pseudotime = pseudotime - pseudotime.min() #make 0 minimum
+    waypoint_weights = W
+    
+    return pseudotime
+
+
+def make_markov_matrix(affinity_matrix):
+    inverse_rowsums = sparse.diags(1/np.array(affinity_matrix.sum(axis = 1)).reshape(-1)).tocsr()
+    markov_matrix = inverse_rowsums.dot(affinity_matrix)
+    return markov_matrix
+
+
+def get_adaptive_affinity_matrix(ka = 10,*, distance_matrix, pseudotime):
+
+    N = distance_matrix.shape[0]
+    distance_matrix = distance_matrix.tocsr()
+    indptr = distance_matrix.indptr
+    k = indptr[1] - indptr[0]
+    assert(np.all(indptr[1:] - indptr[0:-1] == k)), 'distance matrix is not a valid Knn matrix. Different numbers of neighbors for each cell.'
+
+    j, i, d = sparse.find(distance_matrix.T)
+    distances = d.reshape(N, k)
+    
+    sorted_dist = np.sort(distances, axis = 1)
+    #ka_index = np.minimum(np.argmin(~np.isinf(sorted_dist), axis = 1) - 1, ka)
+    kernel_width = sorted_dist[:, ka]
+
+    #finite_mean = kernel_width[np.isfinite(kernel_width)].mean()
+    #kernel_width = np.where(np.isinf(kernel_width), finite_mean, kernel_width)
+    kernel_width = kernel_width
+    delta_pseudotime = np.abs(pseudotime[i] - pseudotime[j])
     
     affinity = np.exp(
-        -(d ** 2) / (adaptive_std[i] * delta_pseudotime) * 0.5
-        -(d ** 2) / (adaptive_std[j] * delta_pseudotime) * 0.5
+        -(d ** 2) / (kernel_width[i] * delta_pseudotime) * 0.5
+        -(d ** 2) / (kernel_width[j] * delta_pseudotime) * 0.5
     )
-    affinity_matrix = sparse.csr_matrix((affinity, (i, j)), [len(pseudotime), len(pseudotime)])
+    affinity_matrix = sparse.csr_matrix((affinity, (i, j)), [N,N])
 
-    return make_markov_matrix(affinity_matrix)
-
-
-def _terminal_states_from_markov_chain(self, directed_chain):
-    raise NotImplementedError()
+    return affinity_matrix, kernel_width#, ka_index
 
 
-def get_branch_probs(num_waypoints = 3000, *, directed_chain, **terminal_cells):
+def prune_backwards_affinities(*, distance_matrix, affinity_matrix, kernel_width, pseudotime):
+
+    distance_matrix = distance_matrix.tocsr()
+    N = distance_matrix.shape[0]
+    j, i, d = sparse.find(distance_matrix.T)
+
+    delta_pseudotime = pseudotime[i] - pseudotime[j]
+
+    rem_edges = delta_pseudotime > kernel_width[i]
+    d[rem_edges] = 0
+
+    affinity_matrix = sparse.coo_matrix((d, (i,j)), (N,N)).tocsr()
+    affinity_matrix.eliminate_zeros()
+
+    return affinity_matrix
 
 
-    absorbing_states = np.zeros(directed_chain.shape[0]).astype(bool)
-    absorbing_states[np.array(absorbing_cells)] = True
+def get_transport_map(ka = 10, n_jobs = -1,*, start_cell, distance_matrix):
 
-    directed_chain = directed_chain.toarray()
+    logger.info('Calculating diffusion pseudotime ...')
+    pseudotime = get_pseudotime(n_jobs = n_jobs, start_cell= start_cell, 
+        distance_matrix = distance_matrix)
+
+    logger.info('Calculating transport map ...')
+    affinity_matrix, kernel_width = get_adaptive_affinity_matrix(ka = ka, 
+        distance_matrix = distance_matrix, pseudotime = pseudotime)
+
+    affinity_matrix = prune_backwards_affinities(
+        distance_matrix = distance_matrix, affinity_matrix = affinity_matrix,
+        kernel_width = kernel_width, pseudotime = pseudotime
+    )
+
+    transport_map = make_markov_matrix(affinity_matrix)
+
+    return pseudotime, transport_map
+
+
+def get_terminal_states(iterations = 1, max_termini = 10, *, transport_map):
+
+    assert(transport_map.shape[0] == transport_map.shape[1])
+    assert(len(transport_map.shape) == 2)
+
+    def _get_stationary_points():
+
+        vals, vectors = eigs(transport_map.T, k = max_termini)
+
+        stationary_vecs = np.isclose(np.real(vals), 1., 1e-3)
+
+        return list(np.real(vectors)[:, stationary_vecs].argmax(0))
+
+    terminal_points = set()
+    for i in range(iterations):
+        terminal_points = terminal_points.union(_get_stationary_points())
+
+    logger.info('Found {} terminal states from stationary distribution.'.format(str(len(terminal_points))))
+
+    return np.array(list(terminal_points))
+
+
+
+def get_branch_probabilities(*, transport_map, **terminal_cells):
+
+    lineage_names, absorbing_cells = list(zip(*terminal_cells.items()))
+    absorbing_states_idx = np.array(absorbing_cells)
+    num_absorbing_cells = len(absorbing_cells)
+    
+    absorbing_states = np.zeros(transport_map.shape[0]).astype(bool)
+    absorbing_states[absorbing_states_idx] = True
+
+    transport_map = transport_map.toarray()
     # Reset absorption state affinities by Removing neigbors
-    directed_chain[absorbing_states, :] = 0
+    transport_map[absorbing_states, :] = 0
     # Diagnoals as 1s
-    directed_chain[absorbing_states, absorbing_states] = 1
+    transport_map[absorbing_states, absorbing_states] = 1
 
     # Fundamental matrix and absorption probabilities
     # Transition states
     trans_states = ~absorbing_states
 
     # Q matrix
-    Q = directed_chain[trans_states, :][:, trans_states]
+    Q = transport_map[trans_states, :][:, trans_states]
 
-    print(Q, Q.shape, Q.sum())
     # Fundamental matrix
     mat = np.eye(Q.shape[0]) - Q
     N = inv(mat)
 
     # Absorption probabilities
-    branch_probs = np.dot(N, directed_chain[trans_states, :][:, absorbing_states])
-    branch_probs[branch_probs < 0] = 0
+    branch_probs = np.dot(N, transport_map[trans_states, :][:, absorbing_states_idx])
+    branch_probs[branch_probs < 0] = 0.
 
     # Add back terminal states
-    branch_probs_including_terminal = np.full((directed_chain.shape[0], absorbing_states.sum()), 0.0)
+    branch_probs_including_terminal = np.full((transport_map.shape[0], num_absorbing_cells), 0.)
     branch_probs_including_terminal[trans_states] = branch_probs
-    branch_probs_including_terminal[absorbing_states] = np.eye(absorbing_states.sum())
+    branch_probs_including_terminal[absorbing_states_idx, np.arange(num_absorbing_cells)] = 1.
+    #terminal_probs = np.full((num_absorbing_cells, num_absorbing_cells), 0.)
+    #terminal_probs[np.arange(num_absorbing_cells), np.argsort(absorbing_states_idx)] = 1.
+    #branch_probs_including_terminal[absorbing_states] = terminal_probs
 
     #self.branch_probs = np.dot(self.waypoint_weights.T, branch_probs_including_terminal)
-
     return branch_probs_including_terminal
 
 
 ## __ TREE INFERENCE FUNCTIONS __ ##
 
-def adaptive_threshold(pseudotime, start_prob, end_cell, stretch = 10, shift = 0.75):
+def get_lineages(*,branch_probs, start_cell):
 
-    def sigmoid(x):
-        return 1/(1+np.exp(-x))
-
-    strictness = np.sqrt((1 - min(start_prob, 0.5) - 0.2) / start_prob)
-    adaptive_scale = strictness*sigmoid(stretch*(pseudotime/pseudotime[end_cell] - shift)) - 0.05
-        
-    return start_prob*adaptive_scale + start_prob
+    return get_lineage_prob_fc(branch_probs = branch_probs, start_cell = start_cell) >= 0
 
 
-def get_lineages(self, stretch = 100., shift=0.99,*, branch_probs, start_cell, pseudotime, terminal_states):
-        
-    assert(isinstance(stretch, float) and stretch > 0)
-    assert(isinstance(shift, (float, int)) and shift > 0 and shift < 1)
+def get_lineage_prob_fc(*, branch_probs, start_cell):
 
+    ep = 0.01
+    lineage_prob_fc = np.hstack([
+        (np.log2(lineage_prob + ep) - np.log2(lineage_prob[start_cell] + ep) )[:, np.newaxis]
+        for lineage_prob in branch_probs.T
+    ])
+
+    return lineage_prob_fc
+
+def get_lineage_branch_time(lineage1, lineage2, pseudotime, prob_fc, threshold = 0.5):
+
+    lin_mask = np.logical_or(prob_fc[:, lineage1] > 0, prob_fc[:, lineage2] > 0)
+    divergence = prob_fc[lin_mask, lineage1] - prob_fc[lin_mask, lineage2]
+
+    state_1 = pseudotime[lin_mask][divergence > threshold]
+    state_2 = pseudotime[lin_mask][divergence < -threshold]
     
-    lineages = []
-    for lineage_num, lineage_probs in enumerate(branch_probs.T):
-
-        threshold = adaptive_threshold(pseudotime, lineage_probs[start_cell], 
-                terminal_states[lineage_num], stretch = stretch, shift = shift)
-        
-        lineage_mask = (lineage_probs >= threshold)[:, np.newaxis]
-        lineage_mask[terminal_states[lineage_num]] = True
-
-        lineages.append(lineage_mask)
-
-    lineages = np.hstack(lineages)
-
-    return lineages
+    
+    if len(state_1) == 0:
+        return state_2.min()
+    elif len(state_2) == 0:
+        return state_1.min()
+    else:
+        return max(state_1.min(), state_2.min())
 
 
-def get_lineage_branch_time(lineage1, lineage2, pseudotime, earliness_shift = 0.0):
+def get_tree_structure(threshold = 0.5,*, lineage_names, branch_probs, pseudotime, start_cell):
+    
+    def get_all_leaves_from_node(edge):
 
-    assert(-1 < earliness_shift < 1)
+        if isinstance(edge, tuple):
+            return [*get_all_leaves_from_node(edge[0]), *get_all_leaves_from_node(edge[1])]
+        else:
+            return [edge]
 
-    part_of_lineage1 = lineage2[lineage1]
-    time = pseudotime[lineage1]
+    def get_node_name(self, node):
+        return ', '.join(map(str, self.lineage_names[self.get_all_leaves_from_node(node)]))
 
-    lr_model = LogisticRegression(class_weight = 'balanced')\
-        .fit(time[:,np.newaxis], part_of_lineage1, (1-part_of_lineage1)+(1-earliness_shift))
+    def merge_rows(x, col1, col2):
+        return np.hstack([
+            (x[:,col1] + x[:, col2])[:, np.newaxis], #merge two lineages into superlineage
+            x[:, ~np.isin(np.arange(x.shape[-1]), [col1, col2])]
+        ])
 
-    branch_time = -1*lr_model.intercept_/lr_model.coef_[0][0]
 
-    return branch_time
-
-
-def greedy_node_merge(self, earliness_shift = 0.0,*, lineages, pseudotime):
-
-    num_cells, num_lineages = lineages.shape
+    num_cells, num_lineages = branch_probs.shape
     all_merged = False
 
-    lineage_tree = np.full((num_lineages, num_lineages), 0)
+    tree_states = np.zeros(num_cells)
+
+    lineages = get_lineages(branch_probs = branch_probs, start_cell = start_cell)
+    branch_probs = branch_probs.copy()
+    lineage_names = list(lineage_names)
+
+    lineage_tree = nx.DiGraph()
+    states_assigned = 1
 
     while not all_merged:
+
+        prob_fc = get_lineage_prob_fc(branch_probs = branch_probs, start_cell = start_cell)
         
         split_time_matrix = np.full((num_lineages, num_lineages), -1.0)
         for i in range(0,num_lineages-1):
             for j in range(i+1, num_lineages):
 
-                l1 = lineages[:, i].copy()
-                l2 = lineages[:, j].copy()
-                
-                branch_time = get_lineage_branch_time(l1, l2, pseudotime, earliness_shift = earliness_shift) +\
-                    get_lineage_branch_time(l2, l1, pseudotime, earliness_shift = earliness_shift)
-                branch_time/=2
-
+                branch_time = get_lineage_branch_time(i, j, pseudotime, prob_fc, threshold)
                 split_time_matrix[i,j] = branch_time
-
-        latest_split_event = np.where(split_time_matrix == split_time_matrix.max())
+        
+        branch_time = split_time_matrix.max()
+        latest_split_event = np.where(split_time_matrix == branch_time)
         merge1, merge2 = latest_split_event[0][0], latest_split_event[1][0]
 
-        #new_branch_name = (lineage_names[merge1], lineage_names[merge2])
-        #lineage_tree.add_split(new_branch_name, split_time_matrix.max())
+        new_branch_name = (lineage_names[merge1], lineage_names[merge2])
 
-        #lineage_names = [new_branch_name] + [lin for i, lin in enumerate(lineage_names) if not i in [merge1, merge2]]
+        assign_cells_mask = np.logical_and(pseudotime >= branch_time, np.logical_or(lineages[:,merge1], lineages[:, merge2]))
+        assign_cells_mask = np.logical_and(assign_cells_mask, ~tree_states.astype(bool))
+        
+        divergence = prob_fc[assign_cells_mask, merge1] - prob_fc[assign_cells_mask, merge2]
+        get_assign_indices = lambda y : np.argwhere(assign_cells_mask)[:,0][y * divergence > 0]
 
-        lineage_tree[merge1, merge2 ]
-        lineages = np.hstack([
-            np.logical_and(lineages[:, merge1], lineages[:, merge2])[:, np.newaxis], #merge two lineages into superlineage
-            lineages[:, ~np.isin(np.arange(num_lineages), [merge1, merge2])].reshape((num_cells, -1))
-        ])
+        tree_states[get_assign_indices(1)] = states_assigned
+        lineage_tree.add_edge(new_branch_name, lineage_names[merge1], branch_time = branch_time, state = states_assigned)
+        states_assigned+=1
+
+        tree_states[get_assign_indices(-1)] = states_assigned
+        lineage_tree.add_edge(new_branch_name, lineage_names[merge2], branch_time = branch_time, state = states_assigned)
+        states_assigned+=1
+
+        lineages = merge_rows(lineages, merge1, merge2).astype(bool)
+        branch_probs = merge_rows(branch_probs, merge1, merge2)
+        lineage_names = [new_branch_name] + [lin for i, lin in enumerate(lineage_names) if not i in [merge1, merge2]]
 
         num_lineages = lineages.shape[-1]
-
+        
         if num_lineages == 1:
             all_merged = True
-
-    return lineage_tree
-
-
-def get_cell_tree_states(self, earliness_shift = 0.0):
-
-    lineage_tree = self._greedy_node_merge(earliness_shift)
-
-    cell_states = np.zeros(self.lineages.shape[0]) - 1
-    state_ratios = np.zeros(self.lineages.shape[0]) - 1
-
-    states_assigned = 1
-    states = { 0 : ("Root", lineage_tree.get_root())}
-    min_split_time=np.inf
-
-    for split, split_time in lineage_tree:
-
-        min_split_time = min(split_time, min_split_time)
-        for i in [0,1]:
             
-            downstream_lineages = lineage_tree.get_all_leaves_from_node(split[i])
-            downstream_cells = self.lineages[:, downstream_lineages].sum(-1)
-            
-            lineage_probability_thresholds = np.hstack([
-                self.adaptive_threshold(self.pseudotime, self.branch_probs[self.start_cell, lin], self.terminal_states[lin],
-                    stretch=self.stretch, shift=self.shift)[:, np.newaxis]
-                for lin in downstream_lineages
-            ])
-
-            prob_lineage_ratio = (self.branch_probs[:, downstream_lineages]/lineage_probability_thresholds).max(-1)
-
-            candidate_cells = np.logical_and(downstream_cells , self.pseudotime >= split_time)
-            assign_cells = np.logical_and(candidate_cells,  prob_lineage_ratio > state_ratios)
-
-            if assign_cells.sum() > 0:
-                states_assigned+=1
-                cell_states[assign_cells] = states_assigned
-                state_ratios[assign_cells] = prob_lineage_ratio[assign_cells]
-                states[states_assigned] = (split, split[i])
-
-    cell_states[np.logical_and(cell_states == -1, self.pseudotime < min_split_time)] = 0
-
-    self.cell_states, self.state_nodes, self.lineage_tree = cell_states.astype(np.int32), states, lineage_tree
-    return self.cell_states
+    state_names = {
+        edge[2]['state'] : ', '.join(set(get_all_leaves_from_node(edge[1])))
+        for edge in lineage_tree.edges(data = True)
+    }
+    
+    state_names[0] = 'Root'
+    
+    return {
+        'tree_states' : [state_names[s] for s in tree_states.astype(int)],
+        'tree' : nx.to_numpy_array(lineage_tree, weight='branch_time'),
+        'state_names' : list(state_names.values()),
+    }

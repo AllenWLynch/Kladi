@@ -218,32 +218,41 @@ def add_factor_hits_data(self, adata, output,*, factor_type):
     factor_id, factor_name, parsed_name, hits = output
 
     adata.varm[factor_type + '_hits'] = hits.T.tocsc()
-    adata.uns[factor_type + '_id'] = list(factor_id)
+    meta_dict = {
+        'id' : list(factor_id),
+        'name' : list(factor_name),
+        'parsed_name' : list(parsed_name),
+        'in_expr_data' : [True]*len(factor_id),
+    }
+    adata.uns[factor_type] = meta_dict
+    '''adata.uns[factor_type + '_id'] = list(factor_id)
     adata.uns[factor_type + '_name'] = list(factor_name)
     adata.uns[factor_type + '_parsed_name'] = list(parsed_name)
-    adata.uns[factor_type + '_in_expr_data'] = list(np.ones(len(factor_id)).astype(bool))
+    adata.uns[factor_type + '_in_expr_data'] = list(np.ones(len(factor_id)).astype(bool))'''
 
     logger.info('Added key to varm: ' + factor_type + '_hits')
-    logger.info('Added key to uns: ' + ', '.join([factor_type + '_' + suffix for suffix in ['id','name','parsed_name','in_expr_data']]))
+    #logger.info('Added key to uns: ' + ', '.join([factor_type + '_' + suffix for suffix in ['id','name','parsed_name','in_expr_data']]))
 
 
 def get_factor_hits(self, adata, factor_type = 'motifs', mask_factors = True):
 
-    suffixes = ['id','name','parsed_name']
+    fields = ['id','name','parsed_name']
 
-    mask = np.array(adata.uns[factor_type + '_in_expr_data'])
+    meta_dict = adata.uns[factor_type]
+
+    mask = np.array(meta_dict['in_expr_data'])
     col_len = len(mask)
 
     if not mask_factors:
         mask = np.ones_like(mask).astype(bool)
 
     metadata = [
-        list(np.array(adata.uns[factor_type + '_' + suffix])[mask])
-        for suffix in suffixes
+        list(np.array(meta_dict[field])[mask])
+        for field in fields
     ]
 
     metadata = list(zip(*metadata))
-    metadata = [dict(zip(suffixes, v)) for v in metadata]
+    metadata = [dict(zip(fields, v)) for v in metadata]
 
     hits_matrix = adata[:, self.features].varm[factor_type + '_hits'].T.tocsr()
     hits_matrix = hits_matrix[mask, :]

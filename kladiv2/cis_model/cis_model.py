@@ -34,6 +34,21 @@ class SaveCallback:
         if model.was_fit:
             model.save(self.prefix)
 
+def mean_default_init_to_value(
+    site = None,
+    values = {},
+    *,
+    fallback = init_to_mean,
+):
+    if site is None:
+        return partial(mean_default_init_to_value, values=values, fallback=fallback)
+
+    if site["name"] in values:
+        return values[site["name"]]
+    if fallback is not None:
+        return fallback(site)
+    raise ValueError(f"No init strategy specified for site {repr(site['name'])}")
+
 class CisModeler:
 
     def __init__(self,*,
@@ -42,7 +57,8 @@ class CisModeler:
         learning_rate = 1, 
         genes = None,
         use_trans_features = False,
-        counts_layer = None):
+        counts_layer = None,
+        initialization_model = None):
 
         self.expr_model = expr_model
         self.accessibility_model = accessibility_model
@@ -50,19 +66,30 @@ class CisModeler:
         self.use_trans_features = use_trans_features
         self.counts_layer = counts_layer
 
+        if use_trans_features and initialization_model is None:
+            logger.warn('Training global regulation models without providing pre-trained cis models may cause divergence in statistical testing.')
+
         self.models = []
         for gene in genes:
+
+            init_params = None
+            try:
+                init_params = initialization_model.get_model(gene).posterior_map
+            except (IndexError, AttributeError):
+                pass
+
             self.models.append(
                 GeneCisModel(
                     gene = gene, 
                     learning_rate = learning_rate, 
-                    use_trans_features = use_trans_features
+                    use_trans_features = use_trans_features,
+                    init_params= init_params
                 )
             )
 
     @property
     def genes(self):
-        return [model.gene for model in self.models]
+        return np.array([model.gene for model in self.models])
 
     @property
     def features(self):
@@ -120,9 +147,24 @@ class CisModeler:
             model.save(prefix)
 
 
+    def get_model(self, gene):
+        try:
+            return self.models[np.argwhere(self.genes == gene)[0,0]]
+        except IndexError:
+            raise IndexError('Model for gene {} does not exist'.format(gene))
+
+
     def load(self, prefix):
-        for model in self.models:
-            model.load(prefix)
+
+        genes = self.genes
+        self.models = []
+        for gene in genes:
+            try:
+                model = GeneCisModel(gene = gene, use_trans_features = self.use_trans_features)
+                model.load(prefix)
+                self.models.append(model)
+            except FileNotFoundError:
+                logger.warn('Cannot load {} model. File not found.'.format(gene))
 
     def subset_fit_models(self, was_fit):
         self.models = [model for fit, model in zip(was_fit, self.models) if fit]
@@ -171,20 +213,26 @@ class GeneCisModel:
         gene, 
         learning_rate = 1.,
         use_trans_features = False,
+        init_params = None
     ):
         self.gene = gene
         self.learning_rate = learning_rate
         self.use_trans_features = use_trans_features
         self.was_fit = False
+        self.init_params = init_params
 
     def _get_weights(self):
         pyro.clear_param_store()
         self.bn = torch.nn.BatchNorm1d(1, momentum = 1.0, affine = False)
-        self.guide = AutoDelta(self.model, init_loc_fn = init_to_mean)
+
+        if self.init_params is None:
+            self.guide = AutoDelta(self.model, init_loc_fn = init_to_mean)
+        else:
+            reformatted_params = {self.prefix + '/' + k.split('/')[-1] : v.detach().clone() for k,v in self.init_params.items()}
+            self.guide = AutoDelta(self.model, init_loc_fn = mean_default_init_to_value(values = reformatted_params))
 
     def get_prefix(self):
         return ('trans' if self.use_trans_features else 'cis') + '_' + self.gene
-
 
     def RP(self, weights, distances, d):
         return (weights * torch.pow(0.5, distances/(1e3 * d))).sum(-1)
