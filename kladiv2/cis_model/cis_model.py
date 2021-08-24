@@ -205,7 +205,7 @@ class CisModeler:
     @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, bar_desc = 'Formatting features')
     def get_features(self, model,features):
         return features
-    
+
 
 class GeneCisModel:
 
@@ -228,8 +228,8 @@ class GeneCisModel:
         if self.init_params is None:
             self.guide = AutoDelta(self.model, init_loc_fn = init_to_mean)
         else:
-            reformatted_params = {self.prefix + '/' + k.split('/')[-1] : v.detach().clone() for k,v in self.init_params.items()}
-            self.guide = AutoDelta(self.model, init_loc_fn = mean_default_init_to_value(values = reformatted_params))
+            self.seed_params = {self.prefix + '/' + k.split('/')[-1] : v.detach().clone() for k,v in self.init_params.items()}
+            self.guide = AutoDelta(self.model, init_loc_fn = mean_default_init_to_value(values = self.seed_params))
 
     def get_prefix(self):
         return ('trans' if self.use_trans_features else 'cis') + '_' + self.gene
@@ -257,7 +257,12 @@ class GeneCisModel:
             with pyro.plate("upstream-downstream", 2):
                 d = pyro.sample('logdistance', dist.LogNormal(np.log(10), 1.))
 
-            theta = pyro.sample('theta', dist.Gamma(2., 0.5))
+            if self.use_trans_features and hasattr(self, 'seed_params'):
+                theta = self.seed_params[self.prefix + '/theta']
+                theta.requires_grad = False
+            else:
+                theta = pyro.sample('theta', dist.Gamma(2., 0.5))
+            
             gamma = pyro.sample('gamma', dist.LogNormal(0., 0.5))
             bias = pyro.sample('bias', dist.Normal(0, 5.))
 
@@ -373,6 +378,10 @@ class GeneCisModel:
         self.was_fit = True
         self.posterior_map = self.guide()
 
+        if self.use_trans_features and hasattr(self, 'seed_params'):
+            theta_name = self.prefix + '/theta'
+            self.posterior_map[theta_name] = self.seed_params[theta_name]
+
         del optimizer
         del features
         del self.guide
@@ -416,9 +425,10 @@ class GeneCisModel:
         logp = dist.NegativeBinomial(total_count = theta, probs = p).log_prob(features['gene_expr'])
         return self.to_numpy(logp)[:, np.newaxis]
         
-
     def prob_isd(self, features):
         pass
+
+
 
     @staticmethod
     def to_numpy(X):

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def wraps_functional(*,
     adata_extractor,
-    adata_adder = lambda adata, output : None,
+    adata_adder = lambda self, adata, output : None,
     del_kwargs = []
 ):
 
@@ -412,4 +412,57 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
 
     return wrap_fn
 
-        
+## PSEUDOTIME STUFF ##
+
+def fetch_diffmap_distances(self, adata, diffmap_distances_key = 'X_diffmap'):
+
+    try:
+        distance_matrix = adata.obsp[diffmap_distances_key + "_distances"]
+    except KeyError:
+        raise KeyError(
+            '''
+You must calculate a diffusion map for the data, and get diffusion-based distances before running this function. Using scanpy:
+    
+    sc.tl.diffmap(adata)
+    sc.pp.neighbors(adata, n_neighbors = 30, use_rep = "X_diffmap", key_added = "X_diffmap")
+            
+            '''
+        )
+
+    return dict(distance_matrix = distance_matrix)
+
+
+def add_transport_map(self, adata, output):
+
+    pseudotime, transport_map, start_cell = output 
+
+    adata.obs['mira_pseudotime'] = pseudotime
+    adata.obsp['transport_map'] = transport_map
+    adata.uns['iroot'] = start_cell
+
+
+def add_branch_probs(self, adata, output):
+    adata.obsm['branch_probs'], adata.uns['lineage_names'] = output
+
+
+def fetch_transport_map(self, adata):
+    return dict(transport_map = adata.obsp['transport_map'])
+
+
+def fetch_tree_state_args(self, adata):
+
+    try:
+        return dict(
+            lineage_names = adata.uns['lineage_names'],
+            branch_probs = adata.obsm['branch_probs'],
+            pseudotime = adata.obs['mira_pseudotime'].values,
+            start_cell = adata.uns['iroot'],
+        )
+    except KeyError:
+        raise KeyError('One of the required pieces to run this function is not present. Make sure you\'ve first run "get_transport_map" and "get_branch_probabilities".')
+
+def add_tree_state_args(self, adata, output):
+
+    adata.obs['tree_states'] = output['tree_states']
+    adata.uns['tree_state_names'] = output['state_names']
+    adata.uns['connectivities_tree'] = output['tree']

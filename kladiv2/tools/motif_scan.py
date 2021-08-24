@@ -175,7 +175,7 @@ def _parse_motif_name(motif_name):
 
 @wraps_functional(adata_extractor = get_peaks, adata_adder = partial(add_factor_hits_data, factor_type = 'motifs'),
     del_kwargs = ['peaks'])
-def find_motifs(peaks, pvalue_threshold = 0.0001,*, genome):
+def find_motifs(peaks, pvalue_threshold = 0.0001,*, genome_fasta):
 
     peaks = validate_peaks(peaks)
 
@@ -185,7 +185,7 @@ def find_motifs(peaks, pvalue_threshold = 0.0001,*, genome):
 
     try:
 
-        get_peak_sequences(peaks, genome, temp_fasta_name)
+        get_peak_sequences(peaks, genome_fasta, temp_fasta_name)
 
         hits_matrix = get_motif_hits(temp_fasta_name, len(peaks), pvalue_threshold = pvalue_threshold)
 

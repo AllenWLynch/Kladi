@@ -12,6 +12,7 @@ from copy import deepcopy
 from scipy.sparse.linalg import eigs
 import logging
 import tqdm
+from kladiv2.core import adata_interface as adi
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def get_children(G, node_idx):
 def is_leaf(G, node_idx):
     
     G = G.astype(bool)
-    return num_children(G) == 0
+    return num_children(G, node_idx) == 0
 
 def get_dendogram_levels(G):
     G = G.astype(bool)
@@ -51,14 +52,14 @@ def get_dendogram_levels(G):
     dfs_tree = list(nx.dfs_predecessors(nx_graph, get_root_state(G)))[::-1]
 
     centerlines = {}
-    num_termini = 0
+    num_termini = [0]
 
     def get_or_set_node_position(node):
 
         if not node in centerlines:
             if is_leaf(G, node):
-                centerlines[node] = num_termini
-                num_termini+=1
+                centerlines[node] = num_termini[0]
+                num_termini[0]+=1
             else:
                 centerlines[node] = np.mean([get_or_set_node_position(child) for child in get_children(G, node)])
 
@@ -229,8 +230,10 @@ def prune_backwards_affinities(*, distance_matrix, affinity_matrix, kernel_width
 
     return affinity_matrix
 
-
-def get_transport_map(ka = 10, n_jobs = -1,*, start_cell, distance_matrix):
+@adi.wraps_functional(
+    adata_extractor = adi.fetch_diffmap_distances, adata_adder = adi.add_transport_map,
+    del_kwargs = ['distance_matrix'])
+def get_transport_map(ka = 5, n_jobs = -1,*, start_cell, distance_matrix):
 
     logger.info('Calculating diffusion pseudotime ...')
     pseudotime = get_pseudotime(n_jobs = n_jobs, start_cell= start_cell, 
@@ -247,10 +250,13 @@ def get_transport_map(ka = 10, n_jobs = -1,*, start_cell, distance_matrix):
 
     transport_map = make_markov_matrix(affinity_matrix)
 
-    return pseudotime, transport_map
+    return pseudotime, transport_map, start_cell
 
-
-def get_terminal_states(iterations = 1, max_termini = 10, *, transport_map):
+@adi.wraps_functional(
+    adata_extractor = adi.fetch_transport_map, adata_adder = adi.return_output, 
+    del_kwargs = ['transport_map']
+)
+def find_terminal_cells(iterations = 1, max_termini = 10, *, transport_map):
 
     assert(transport_map.shape[0] == transport_map.shape[1])
     assert(len(transport_map.shape) == 2)
@@ -271,11 +277,14 @@ def get_terminal_states(iterations = 1, max_termini = 10, *, transport_map):
 
     return np.array(list(terminal_points))
 
-
-
-def get_branch_probabilities(*, transport_map, **terminal_cells):
+@adi.wraps_functional(
+    adata_extractor = adi.fetch_transport_map, adata_adder = adi.add_branch_probs,
+    del_kwargs = ['transport_map']
+)
+def get_branch_probabilities(*, transport_map, terminal_cells):
 
     lineage_names, absorbing_cells = list(zip(*terminal_cells.items()))
+
     absorbing_states_idx = np.array(absorbing_cells)
     num_absorbing_cells = len(absorbing_cells)
     
@@ -307,12 +316,8 @@ def get_branch_probabilities(*, transport_map, **terminal_cells):
     branch_probs_including_terminal = np.full((transport_map.shape[0], num_absorbing_cells), 0.)
     branch_probs_including_terminal[trans_states] = branch_probs
     branch_probs_including_terminal[absorbing_states_idx, np.arange(num_absorbing_cells)] = 1.
-    #terminal_probs = np.full((num_absorbing_cells, num_absorbing_cells), 0.)
-    #terminal_probs[np.arange(num_absorbing_cells), np.argsort(absorbing_states_idx)] = 1.
-    #branch_probs_including_terminal[absorbing_states] = terminal_probs
 
-    #self.branch_probs = np.dot(self.waypoint_weights.T, branch_probs_including_terminal)
-    return branch_probs_including_terminal
+    return branch_probs_including_terminal, lineage_names
 
 
 ## __ TREE INFERENCE FUNCTIONS __ ##
@@ -346,11 +351,14 @@ def get_lineage_branch_time(lineage1, lineage2, pseudotime, prob_fc, threshold =
     elif len(state_2) == 0:
         return state_1.min()
     else:
-        return max(state_1.min(), state_2.min())
+        return (state_1.min() + state_2.min())/2
 
+@adi.wraps_functional(
+    adata_extractor = adi.fetch_tree_state_args, adata_adder = adi.add_tree_state_args,
+    del_kwargs = ['lineage_names', 'branch_probs', 'pseudotime', 'start_cell'],
+)
+def get_tree_structure(threshold = 0.1,*, lineage_names, branch_probs, pseudotime, start_cell):
 
-def get_tree_structure(threshold = 0.5,*, lineage_names, branch_probs, pseudotime, start_cell):
-    
     def get_all_leaves_from_node(edge):
 
         if isinstance(edge, tuple):
