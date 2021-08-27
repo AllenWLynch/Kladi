@@ -10,21 +10,14 @@ import pyro
 import numpy as np
 import warnings
 from scipy.sparse import isspmatrix
-import json
-import requests
-import configparser
 from functools import partial
 from pyro import poutine
 from kladiv2.core.adata_interface import *
-from kladiv2.plots.base import map_plot
-from kladiv2.plots.enrichment_plot import plot_enrichment
+import kladiv2.tools.enrichr_enrichments as enrichr
 import logging
 
 
 logger = logging.getLogger(__name__)
-
-config = configparser.ConfigParser()
-config.read('kladi/matrix_models/config.ini')
 
 
 class ExpressionEncoder(torch.nn.Module):
@@ -253,28 +246,11 @@ class ExpressionModel(BaseModel):
 
             assert(isinstance(top_n, int) and top_n > 0)
             return self.rank_genes(topic_num)[-top_n : ]
-    
-
-    def _post_genelist(self, genelist):
-
-        enrichr_url = config.get('Enrichr','url')
-        post_endpoint = config.get('Enrichr','post')
-
-        payload = {
-            'list': (None, '\n'.join(genelist)),
-        }
-
-        response = requests.post(enrichr_url + post_endpoint, files=payload)
-        if not response.ok:
-            raise Exception('Error analyzing gene list')
-
-        list_id = json.loads(response.text)['userListId']
-        return list_id
 
 
     def post_topic(self, topic_num, top_n = None, min_genes = 200, max_genes = 600):
 
-        list_id = self._post_genelist(
+        list_id = enrichr.post_genelist(
             self.get_top_genes(topic_num, top_n = top_n, min_genes = min_genes, max_genes = max_genes)
         )
 
@@ -288,23 +264,8 @@ class ExpressionModel(BaseModel):
         for i in range(self.num_topics):
             self.post_topic(i, top_n = top_n, min_genes = min_genes, max_genes = max_genes)
 
-    def _get_ontology(self, list_id, ontology = 'WikiPathways_2019_Human'):
 
-        enrichr_url = config.get('Enrichr','url')
-        get_endpoint = config.get('Enrichr','get').format(list_id = list_id, ontology = ontology)
-
-        response = requests.get(enrichr_url + get_endpoint)
-        if not response.ok:
-            raise Exception('Error fetching enrichment results: \n' + str(response))
-        
-        data = json.loads(response.text)[ontology]
-
-        headers = config.get('Enrichr','results_headers').split(',')
-        
-        return {ontology : [dict(zip(headers, x)) for x in data]}
-
-
-    def get_topic_enrichments(self, topic_num, ontologies = config.get('Enrichr','ontologies').split(',')):
+    def fetch_topic_enrichments(self, topic_num, ontologies = enrichr.LEGACY_ONTOLOGIES):
 
         try:
             self.enrichments
@@ -316,17 +277,28 @@ class ExpressionModel(BaseModel):
         except (KeyError, IndentationError):
             raise KeyError('User has not posted topic yet, run "post_topic" first.')
 
-        for ontology in ontologies:
-            self.enrichments[topic_num]['results'].update(self._get_ontology(list_id, ontology=ontology))
+        self.enrichments[topic_num]['results'].update(
+            enrichr.fetch_ontologies(list_id, ontologies = ontologies)
+        )
+        #for ontology in ontologies:
+            #self.enrichments[topic_num]['results'].update(enrichr.get_ontology(list_id, ontology=ontology))
 
 
-    def get_enrichments(self,  ontologies = config.get('Enrichr','ontologies').split(',')):
+    def fetch_enrichments(self,  ontologies = enrichr.LEGACY_ONTOLOGIES):
         
         for i in range(self.num_topics):
-            self.get_topic_enrichments(i, ontologies = ontologies)
+            self.fetch_topic_enrichments(i, ontologies = ontologies)
 
 
-    def plot_enrichments(self, topic_num, show_genes = True, show_top = 5, barcolor = 'lightgrey', label_genes = [],
+    def get_enrichments(self, topic_num):
+        
+        try:
+            return self.enrichments[topic_num]['results']
+        except (KeyError, IndentationError):
+            raise KeyError('User has not posted topic yet, run "post_topic" first.')
+
+    
+    def plot_enrichments(self, topic_num, show_genes = True, show_top = 10, barcolor = 'lightgrey', label_genes = [],
         text_color = 'black', return_fig = False, enrichments_per_row = 2, height = 4, aspect = 2.5, max_genes = 15):
         '''
         Make plot of geneset enrichments given results from ``get_ontology`` or ``get_enrichments``.
@@ -366,12 +338,7 @@ class ExpressionModel(BaseModel):
 
         if len(results) == 0:
             raise Exception('No results for this topic, user must run "get_topic_enrichments" or "get_enrichments" before plotting.')
-        
-        func = partial(plot_enrichment, text_color = text_color, label_genes = label_genes,
-            show_top = show_top, barcolor = barcolor, show_genes = show_genes, max_genes = max_genes)
 
-        fig, ax = map_plot(func, list(results.items()), plots_per_row = enrichments_per_row, 
-            height =height, aspect = aspect)  
-
-        if return_fig:
-            return fig, ax
+        return enrichr.plot_enrichments(results, text_color = text_color, label_genes = label_genes,
+            show_top = show_top, barcolor = barcolor, show_genes = show_genes, max_genes = max_genes,
+            plots_per_row = enrichments_per_row, height = height, aspect = aspect)

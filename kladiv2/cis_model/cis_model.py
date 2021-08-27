@@ -22,6 +22,7 @@ from kladiv2.cis_model.optim import LBFGS as stochastic_LBFGS
 import torch.nn.functional as F
 import gc
 import argparse
+from scipy.stats import nbinom
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class CisModeler:
 
     
     def _get_features_for_model(self,*, gene_expr, read_depth, expr_softmax_denom, trans_features, atac_softmax_denom, 
-        upstream_idx, downstream_idx, promoter_idx, upstream_distances, downstream_distances):
+        upstream_idx, downstream_idx, promoter_idx, upstream_distances, downstream_distances, include_factor_data = False):
 
         features = dict(
             gene_expr = gene_expr,
@@ -135,6 +136,14 @@ class CisModeler:
             upstream_distances = upstream_distances,
             downstream_distances = downstream_distances,
         )
+        
+        if include_factor_data:
+            features.update(dict(
+                promoter_idx = promoter_idx,
+                upstream_idx = upstream_idx,
+                downstream_idx = downstream_idx
+            ))
+
         for k, idx in zip(['upstream_weights', 'downstream_weights', 'promoter_weights'],
                     [upstream_idx, downstream_idx, promoter_idx]):
 
@@ -203,8 +212,18 @@ class CisModeler:
         return model.to_numpy(model.get_posterior_sample(features, site))[:, np.newaxis]
 
     @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, bar_desc = 'Formatting features')
-    def get_features(self, model,features):
+    def get_features(self, model, features):
         return features
+
+    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, 
+        bar_desc = 'Formatting features', include_factor_data = True)
+    def get_isd_features(self, model, features,*,hits_matrix, metadata):
+        return features
+
+    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, 
+        bar_desc = 'Predicting TF influence', include_factor_data = True)
+    def probabalistic_ISD(self, model, features,*,hits_matrix, metadata):
+        return model.probabalistic_ISD(features, hits_matrix)
 
 
 class GeneCisModel:
@@ -236,7 +255,6 @@ class GeneCisModel:
 
     def RP(self, weights, distances, d):
         return (weights * torch.pow(0.5, distances/(1e3 * d))).sum(-1)
-
 
     def model(self, 
         gene_expr, 
@@ -424,11 +442,6 @@ class GeneCisModel:
 
         logp = dist.NegativeBinomial(total_count = theta, probs = p).log_prob(features['gene_expr'])
         return self.to_numpy(logp)[:, np.newaxis]
-        
-    def prob_isd(self, features):
-        pass
-
-
 
     @staticmethod
     def to_numpy(X):
@@ -452,6 +465,72 @@ class GeneCisModel:
         state = torch.load(self.get_savename(prefix))
         self._load_save_data(state)
 
+
+    def get_normalized_params(self):
+        return {
+            k[len(self.prefix) + 1:] : v.detach().cpu().numpy()
+            for k, v in self.posterior_map.items()
+        }
+
+    @staticmethod
+    def _prob_ISD(hits_matrix,*, upstream_weights, downstream_weights, 
+        promoter_weights, upstream_idx, promoter_idx, downstream_idx,
+        upstream_distances, downstream_distances, read_depth, 
+        softmax_denom, gene_expr, trans_features, params, bn_eps):
+        
+        hit_masks = hits_matrix.astype(bool)
+        num_factors = hits_matrix.shape[0]
+
+        def tile(x):
+            x = np.expand_dims(x, -1)
+            return np.tile(x, num_factors+1).transpose((0,2,1))
+
+        def delete_regions(weights, region_mask):
+            
+            num_regions = len(region_mask)
+            hits = 1 - hits_matrix[:, region_mask].toarray().astype(int) #1, factors, regions
+            hits = np.vstack([np.ones((1, num_regions)), hits])
+            hits = hits[np.newaxis, :, :].astype(int)
+
+            return np.multiply(weights, hits)
+
+        upstream_weights = delete_regions(tile(upstream_weights), upstream_idx) #cells, factors, regions
+        promoter_weights = delete_regions(tile(promoter_weights), promoter_idx)
+        downstream_weights = delete_regions(tile(downstream_weights), downstream_idx)
+
+        read_depth = read_depth[:, np.newaxis]
+        softmax_denom = softmax_denom[:, np.newaxis]
+
+        upstream_distances = upstream_distances[np.newaxis, np.newaxis, :]
+        downstream_distances = downstream_distances[np.newaxis,np.newaxis, :]
+        expression = gene_expr[:, np.newaxis]
+
+        def RP(weights, distances, d):
+            return (weights * np.power(0.5, distances/(1e3 * d))).sum(-1)
+
+        f_Z = params['a'][0] * RP(upstream_weights, upstream_distances, params['logdistance'][0]) \
+        + params['a'][1] * RP(downstream_weights, downstream_distances, params['logdistance'][1]) \
+        + params['a'][2] * promoter_weights.sum(-1) # cells, factors
+
+        f_Z = (f_Z - f_Z.mean(0,keepdims = True))/np.sqrt(f_Z.var(0, keepdims = True) + bn_eps)
+
+        indep_rate = np.exp(params['gamma'] * f_Z + params['bias'])
+        compositional_rate = indep_rate/softmax_denom
+
+        mu = np.exp(read_depth) * compositional_rate
+
+        p = mu / (mu + params['theta'])
+
+        logp_data = nbinom(params['theta'], 1 - p).logpmf(expression).sum(0)
+        return logp_data[0] - logp_data[1:]
+
+
+    def probabalistic_ISD(self, features, hits_matrix):
+        return self._prob_ISD(
+            hits_matrix, **features, 
+            params = self.get_normalized_params(), 
+            bn_eps= self.bn.eps
+        )
 
 def main(*,atac_adata, rna_adata, expr_model, accessibility_model, genes, save_prefix,
             learning_rate = 1., gene_start_idx = 0, use_trans_features = False):

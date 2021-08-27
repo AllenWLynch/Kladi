@@ -48,8 +48,9 @@ def is_leaf(G, node_idx):
 def get_dendogram_levels(G):
     G = G.astype(bool)
     nx_graph = nx.convert_matrix.from_numpy_array(G)
-
-    dfs_tree = list(nx.dfs_predecessors(nx_graph, get_root_state(G)))[::-1]
+    
+    start_node = get_root_state(G)
+    dfs_tree = list(nx.dfs_predecessors(nx_graph, start_node))[::-1] + [start_node]
 
     centerlines = {}
     num_termini = [0]
@@ -107,11 +108,11 @@ def sample_waypoints(num_waypoints = 3000,*, diffmap):
     return waypoints
 
 
-def get_pseudotime(max_iterations = 25, n_jobs = -1,*, start_cell, distance_matrix):
+def get_pseudotime(max_iterations = 25, n_waypoints = 3000, n_jobs = -1,*, start_cell, distance_matrix, diffmap):
 
     assert(isinstance(max_iterations, int) and max_iterations > 0)
     N = distance_matrix.shape[0]
-    cells = np.arange(N)
+    cells = sample_waypoints(num_waypoints=n_waypoints, diffmap = diffmap)
 
     ####
 
@@ -230,14 +231,15 @@ def prune_backwards_affinities(*, distance_matrix, affinity_matrix, kernel_width
 
     return affinity_matrix
 
+
 @adi.wraps_functional(
     adata_extractor = adi.fetch_diffmap_distances, adata_adder = adi.add_transport_map,
     del_kwargs = ['distance_matrix'])
-def get_transport_map(ka = 5, n_jobs = -1,*, start_cell, distance_matrix):
+def get_transport_map(ka = 5, n_jobs = -1,*, start_cell, distance_matrix, diffmap):
 
     logger.info('Calculating diffusion pseudotime ...')
     pseudotime = get_pseudotime(n_jobs = n_jobs, start_cell= start_cell, 
-        distance_matrix = distance_matrix)
+        distance_matrix = distance_matrix, diffmap = diffmap)
 
     logger.info('Calculating transport map ...')
     affinity_matrix, kernel_width = get_adaptive_affinity_matrix(ka = ka, 
@@ -317,7 +319,7 @@ def get_branch_probabilities(*, transport_map, terminal_cells):
     branch_probs_including_terminal[trans_states] = branch_probs
     branch_probs_including_terminal[absorbing_states_idx, np.arange(num_absorbing_cells)] = 1.
 
-    return branch_probs_including_terminal, lineage_names
+    return branch_probs_including_terminal, list(lineage_names)
 
 
 ## __ TREE INFERENCE FUNCTIONS __ ##
@@ -351,7 +353,8 @@ def get_lineage_branch_time(lineage1, lineage2, pseudotime, prob_fc, threshold =
     elif len(state_2) == 0:
         return state_1.min()
     else:
-        return (state_1.min() + state_2.min())/2
+        return max(state_1.min(), state_2.min())
+
 
 @adi.wraps_functional(
     adata_extractor = adi.fetch_tree_state_args, adata_adder = adi.add_tree_state_args,
@@ -427,16 +430,23 @@ def get_tree_structure(threshold = 0.1,*, lineage_names, branch_probs, pseudotim
         
         if num_lineages == 1:
             all_merged = True
+
+    lineage_tree.add_edge('Root', lineage_names[0], branch_time = -1, state = 0)
+
+    def get_node_name(node):
+        if node == 'Root':
+            return node
+
+        return ', '.join(set(get_all_leaves_from_node(node)))
             
     state_names = {
-        edge[2]['state'] : ', '.join(set(get_all_leaves_from_node(edge[1])))
+        edge[2]['state'] : get_node_name(edge[1])
         for edge in lineage_tree.edges(data = True)
     }
     
-    state_names[0] = 'Root'
     
     return {
         'tree_states' : [state_names[s] for s in tree_states.astype(int)],
         'tree' : nx.to_numpy_array(lineage_tree, weight='branch_time'),
-        'state_names' : list(state_names.values()),
+        'state_names' : [get_node_name(node) for node in lineage_tree.nodes],
     }

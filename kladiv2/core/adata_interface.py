@@ -54,6 +54,7 @@ def wraps_functional(*,
 
             output = func(**adata_extractor(None, adata, **getter_kwargs), **function_kwargs)
 
+            #print(output, adata, adder_kwargs)
             return adata_adder(None, adata, output, **adder_kwargs)
 
         return _run
@@ -231,31 +232,36 @@ def add_factor_hits_data(self, adata, output,*, factor_type):
     adata.uns[factor_type + '_in_expr_data'] = list(np.ones(len(factor_id)).astype(bool))'''
 
     logger.info('Added key to varm: ' + factor_type + '_hits')
+    logger.info('Added key to uns: ' + factor_type + '_hits')
     #logger.info('Added key to uns: ' + ', '.join([factor_type + '_' + suffix for suffix in ['id','name','parsed_name','in_expr_data']]))
 
 
 def get_factor_hits(self, adata, factor_type = 'motifs', mask_factors = True):
 
-    fields = ['id','name','parsed_name']
+    try:
+        fields = ['id','name','parsed_name']
 
-    meta_dict = adata.uns[factor_type]
+        meta_dict = adata.uns[factor_type]
 
-    mask = np.array(meta_dict['in_expr_data'])
-    col_len = len(mask)
+        mask = np.array(meta_dict['in_expr_data'])
+        col_len = len(mask)
 
-    if not mask_factors:
-        mask = np.ones_like(mask).astype(bool)
+        if not mask_factors:
+            mask = np.ones_like(mask).astype(bool)
 
-    metadata = [
-        list(np.array(meta_dict[field])[mask])
-        for field in fields
-    ]
+        metadata = [
+            list(np.array(meta_dict[field])[mask])
+            for field in fields
+        ]
 
-    metadata = list(zip(*metadata))
-    metadata = [dict(zip(fields, v)) for v in metadata]
+        metadata = list(zip(*metadata))
+        metadata = [dict(zip(fields, v)) for v in metadata]
 
-    hits_matrix = adata[:, self.features].varm[factor_type + '_hits'].T.tocsr()
-    hits_matrix = hits_matrix[mask, :]
+        hits_matrix = adata[:, self.features].varm[factor_type + '_hits'].T.tocsr()
+        hits_matrix = hits_matrix[mask, :]
+    
+    except KeyError:
+        raise KeyError('User must run "find_motifs" or "find_ChIP_hits" to add binding data before running this function')
 
     return dict(
         hits_matrix = hits_matrix,
@@ -320,26 +326,34 @@ def add_peak_gene_distances(self, adata, output):
     adata.varm['distance_to_TSS'] = distances.tocsc()
     adata.uns['distance_to_TSS_genes'] = list(genes)
 
+    logger.info('Added key to var: distance_to_TSS')
+    logger.info('Added key to uns: distance_to_TSS_genes')
 
-def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : None, bar_desc = ''):
+
+def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : None, 
+    bar_desc = '', include_factor_data = False):
 
     def wrap_fn(func):
 
-        def mock_signature(*, expr_adata, atac_adata, atac_topic_comps_key = 'X_topic_compositions'):
+        def rp_signature(*, expr_adata, atac_adata, atac_topic_comps_key = 'X_topic_compositions'):
+            pass
+
+        def isd_signature(*, expr_adata, atac_adata, atac_topic_comps_key = 'X_topic_compositions', factor_type = 'motifs'):
             pass
 
         func_signature = inspect.signature(func).parameters.copy()
-        mock = inspect.signature(mock_signature).parameters.copy()
+        
+        if include_factor_data:
+            rp_signature = isd_signature
+
+        mock = inspect.signature(rp_signature).parameters.copy()
 
         func_signature.update(mock)
-        #func_signature.pop('self')
-        #del func_signature['model']
-        #del func_signature['features']
-        
         func.__signature__ = inspect.Signature(list(func_signature.values()))
         
         @wraps(func)
-        def get_RP_model_features(self,*, expr_adata, atac_adata, atac_topic_comps_key = 'X_topic_compositions', **kwargs):
+        def get_RP_model_features(self,*, expr_adata, atac_adata, atac_topic_comps_key = 'X_topic_compositions', 
+            factor_type = 'motifs', **kwargs):
 
             if not 'model_read_scale' in expr_adata.obs.columns:
                 self.expr_model._get_read_depth(expr_adata)
@@ -365,6 +379,10 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
                 raise Exception('Peaks have not been annotated with TSS locations. Run "get_distance_to_TSS" before proceeding.')
 
             distance_matrix = atac_adata.varm['distance_to_TSS'].T #genes, #regions
+
+            hits_data = dict()
+            if include_factor_data:
+                hits_data = get_factor_hits(self.accessibility_model, atac_adata, factor_type = factor_type)
 
             results = []
             for model in tqdm(self.models, desc = bar_desc):
@@ -402,7 +420,10 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
                             expr_softmax_denom = expr_softmax_denom,
                             trans_features = trans_features,
                             atac_softmax_denom = atac_softmax_denom,
-                            **model_features),
+                            include_factor_data = include_factor_data,
+                            **model_features,
+                            ),
+                        **hits_data,
                         **kwargs)
                 )
 
@@ -418,6 +439,7 @@ def fetch_diffmap_distances(self, adata, diffmap_distances_key = 'X_diffmap'):
 
     try:
         distance_matrix = adata.obsp[diffmap_distances_key + "_distances"]
+        diffmap = adata.obsm[diffmap_distances_key]
     except KeyError:
         raise KeyError(
             '''
@@ -429,7 +451,7 @@ You must calculate a diffusion map for the data, and get diffusion-based distanc
             '''
         )
 
-    return dict(distance_matrix = distance_matrix)
+    return dict(distance_matrix = distance_matrix, diffmap = diffmap)
 
 
 def add_transport_map(self, adata, output):
@@ -440,9 +462,16 @@ def add_transport_map(self, adata, output):
     adata.obsp['transport_map'] = transport_map
     adata.uns['iroot'] = start_cell
 
+    logger.info('Added key to obs: mira_pseudotime')
+    logger.info('Added key to obsp: transport_map')
+    logger.info('Added key to uns: iroot')
+
 
 def add_branch_probs(self, adata, output):
     adata.obsm['branch_probs'], adata.uns['lineage_names'] = output
+
+    logger.info('Added key to obsm: branch_probs')
+    logger.info('Added key to uns: lineage_names')
 
 
 def fetch_transport_map(self, adata):
@@ -466,3 +495,130 @@ def add_tree_state_args(self, adata, output):
     adata.obs['tree_states'] = output['tree_states']
     adata.uns['tree_state_names'] = output['state_names']
     adata.uns['connectivities_tree'] = output['tree']
+
+    logger.info('Added key to obs: tree_states')
+    logger.info('Added key to uns: tree_state_names')
+    logger.info('Added key to uns: connectivities_tree')
+
+## LOCAL/GLOBAL STUFF ##
+
+def fetch_logp_data(self, adata, counts_layer = None):
+
+    try:
+        cis_logp = adata.layers['cis_logp']
+    except KeyError:
+        raise KeyError('User must run "get_logp" using a trained cis_model object before running this function')
+
+    try:
+        trans_logp = adata.layers['trans_logp']
+    except KeyError:
+        raise KeyError('User must run "get_logp" using a trained global_model (set use_trans_features = True on cis_model object) before running this function')
+
+    overlapped_genes = np.logical_and(np.isfinite(cis_logp).all(0), np.isfinite(trans_logp).all(0))
+    expression = fetch_layer(adata, counts_layer)
+
+    return dict(
+        cis_logp = cis_logp[:, overlapped_genes],
+        trans_logp = trans_logp[:, overlapped_genes],
+        gene_expr = expression[:, overlapped_genes],
+        genes = adata.var_names[overlapped_genes].values,
+    )
+
+
+def project_row(adata_index, project_features, vals, width):
+
+    orig_feature_idx = dict(zip(adata_index, np.arange(width)))
+
+    original_to_imputed_map = np.array(
+        [orig_feature_idx[feature] for feature in project_features]
+    )
+
+    new_row = np.full(width, np.nan)
+    new_row[original_to_imputed_map] = vals
+    return new_row
+    
+
+def add_global_test_statistic(self, adata, output):
+
+    genes, test_stat, pval, nonzero_counts = output
+    
+    adata.var['global_regulation_test_statistic'] = \
+        project_row(adata.var_names.values, genes, test_stat, adata.shape[-1])
+
+    adata.var['global_regulation_pval'] = \
+        project_row(adata.var_names.values, genes, pval, adata.shape[-1])
+
+    adata.var['nonzero_counts'] = \
+        project_row(adata.var_names.values, genes, nonzero_counts, adata.shape[-1])
+
+    logger.info('Added keys to var: global_regulation_test_statistic, global_regulation_pval, nonzero_counts')
+
+
+def fetch_global_test_statistic(self, adata):
+
+    try:
+        test_stat = adata.var['global_regulation_test_statistic']
+    except KeyError:
+        raise KeyError(
+            'User must run "global_local_test" function to calculate test_statistic before running this function'
+        )
+
+    genes = adata.var_names
+    mask = np.isfinite(test_stat)
+
+    return dict(
+        genes = genes[mask],
+        test_statistic = test_stat[mask],
+    )
+
+def fetch_cis_trans_prediction(self, adata):
+
+    try:
+        cis = adata.layers['cis_prediction']
+    except KeyError:
+        raise KeyError('User must run "predict" with a cis_model object before running this function.')
+
+    try:
+        trans = adata.layers['trans_prediction']
+    except KeyError:
+        raise KeyError('User must run "predict" with a cis_model object with "use_trans_features" set to true before running this function.')
+
+    return dict(
+        cis_prediction = cis,
+        trans_prediction = trans,
+    )
+
+def add_chromatin_differential(self, adata, output):
+    adata.layers['chromatin_differential'] = output
+    logger.info('Added key to layers: chromatin_differential')
+
+
+def fetch_differential_plot(self, adata, counts_layer = None, genes = None):
+
+    assert(not genes is None)
+
+    if isinstance(genes, str):
+        genes = [genes]
+    
+    adata = adata[:, genes]
+
+    r = fetch_cis_trans_prediction(None, adata)
+
+    try:
+        r['chromatin_differential'] = adata.layers['chromatin_differential']
+    except KeyError:
+        raise KeyError('User must run function "get_cis_differential" before running this function.')
+
+    try:
+        r['umap'] = adata.obsm['X_umap']
+    except KeyError:
+        raise KeyError('X_umap: adata must have a UMAP representation to make this plot.')
+
+    expr = fetch_layer(adata, counts_layer)
+    if isspmatrix(expr):
+        expr = expr.toarray()
+
+    r['expression'] = expr
+    r['gene_names'] = genes
+
+    return r
