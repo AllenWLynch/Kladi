@@ -228,7 +228,7 @@ class ExpressionModel(BaseModel):
 
         if top_n is None:
             gene_scores = self._score_features()[topic_num,:]
-            top_genes_mask = gene_scores - np.maxmimum(gene_scores.mean(),0) > 2
+            top_genes_mask = gene_scores - np.maximum(gene_scores.mean(),0) > 2
 
             genes_found = top_genes_mask.sum() 
 
@@ -341,4 +341,4 @@ class ExpressionModel(BaseModel):
 
         return enrichr.plot_enrichments(results, text_color = text_color, label_genes = label_genes,
             show_top = show_top, barcolor = barcolor, show_genes = show_genes, max_genes = max_genes,
-            plots_per_row = enrichments_per_row, height = height, aspect = aspect)
+            enrichments_per_row = enrichments_per_row, height = height, aspect = aspect)

@@ -1,7 +1,7 @@
 
 import warnings
 import numpy as np
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, ColorConverter
 from matplotlib import cm
 from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
@@ -33,21 +33,27 @@ def map_plot(func, data, plots_per_row = 3, height =4, aspect = 1.5):
     return fig, ax
 
 
-def map_colors(ax, c, palette, add_legend = True, hue_order = None, 
+def map_colors(ax, c, palette, add_legend = True, hue_order = None, na_color = 'lightgrey',
         legend_kwargs = {}, cbar_kwargs = {}, vmin = None, vmax = None):
 
     assert(isinstance(c, (np.ndarray, list)))
     
     if isinstance(c, list):
         c = np.array(c)
+    c = np.ravel(c)
 
     if np.issubdtype(c.dtype, np.number):
+        
+        na_mask = np.isnan(c)
 
         colormapper=cm.ScalarMappable(Normalize(
-            c.min() if vmin is None else vmin,
-            c.max() if vmax is None else vmax), 
+            np.nanmin(c) if vmin is None else vmin,
+            np.nanmax(c) if vmax is None else vmax), 
             cmap=palette)
         c = colormapper.to_rgba(c)
+
+        if na_mask.sum() > 0:
+            c[na_mask] = ColorConverter().to_rgba(na_color)
 
         if add_legend:
             plt.colorbar(colormapper, ax=ax, **cbar_kwargs)
@@ -55,8 +61,11 @@ def map_colors(ax, c, palette, add_legend = True, hue_order = None,
         return c
 
     else:
+        na_mask = c == 'nan'
         
-        classes = sorted(set(c))
+        classes = list(
+            dict(zip(c, range(len(c)))).keys()
+        )[::-1] #set, order preserved
 
         if isinstance(palette, list):
             num_colors = len(palette)
@@ -81,10 +90,13 @@ def map_colors(ax, c, palette, add_legend = True, hue_order = None,
             class_colors = dict(zip(hue_order, color_wheel))
 
         c = np.array([class_colors[c_class] for c_class in c])
-
+        
+        if na_mask.sum() > 0:
+            c[na_mask] = ColorConverter().to_rgba(na_color)
+        
         if add_legend:
             ax.legend(handles = [
-                Patch(color = color, label = str(c_class)) for c_class, color in class_colors.items()
+                Patch(color = color, label = str(c_class)) for c_class, color in class_colors.items() if not c_class == 'nan'
             ], **legend_kwargs)
 
         return c

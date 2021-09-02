@@ -3,14 +3,15 @@ import matplotlib.pyplot as plt
 from kladiv2.plots.base import map_colors, plot_umap
 import numpy as np
 import kladiv2.core.adata_interface as adi
-from sklearn.preprocessing import minmax_scale
+from matplotlib.patches import Patch
+import warnings
 
 def _plot_chromatin_differential(
     ax, 
     expr_pallete = 'Reds', 
     cis_prediction_palette = 'viridis',
     differential_palette = 'coolwarm',
-    size = 1.5, *,
+    size = 1.5, differential_vmax = 3, differential_vmin = -3, *,
     gene_name,
     umap,
     chromatin_differential, 
@@ -20,7 +21,7 @@ def _plot_chromatin_differential(
 ):
 
     plot_umap(umap, chromatin_differential, ax = ax[0], palette = differential_palette,
-    size = size, vmin = -3, vmax = 3, title = gene_name + ' Chromatin Differential')
+    size = size, vmin = differential_vmin, vmax = differential_vmax, title = gene_name + ' Chromatin Differential')
 
     plot_umap(umap, expression, palette = expr_pallete, ax = ax[1],
         add_legend = True, size = size, title = gene_name + ' Expression',
@@ -37,7 +38,7 @@ def _plot_chromatin_differential(
         c = map_colors(
             ax[3], expression[plot_order], palette = expr_pallete, 
             cbar_kwargs = dict(
-                location = 'right', pad = 0.1, shrink = 1., aspect = 15, label = 'Expression'
+                location = 'right', pad = 0.1, shrink = 0.5, aspect = 15, label = 'Expression'
             )
         ),
         edgecolor = 'lightgrey',
@@ -49,10 +50,26 @@ def _plot_chromatin_differential(
         xlabel = 'Trans Prediction',
         ylabel = 'Cis Prediction',
     )
-    line_extent = cis_prediction.max()
-    ax[3].plot([0,line_extent], [0, line_extent], color = 'grey')
+    
+    line_extent = max(cis_prediction.max(), trans_prediction.max()) * 1.2
+    
+    ax[3].fill_between([0, line_extent],[0, line_extent], color = 'royalblue', alpha = 0.025)
+    ax[3].fill_between([0, line_extent],[line_extent, line_extent],[0, line_extent], color = 'red', alpha = 0.025)
+
+    ax[3].legend(handles = [
+                Patch(color = 'cornflowerblue', label = 'Under-estimates', alpha = 0.5),
+                Patch(color = 'indianred', label = 'Over-estimates', alpha = 0.5)
+            ], **dict(
+                loc="lower center", bbox_to_anchor=(0.5, -0.5), frameon = False, ncol = 2, 
+            ))
+    
+    ax[3].plot([0, line_extent], [0, line_extent], color = 'grey')
     ax[3].spines['right'].set_visible(False)
     ax[3].spines['top'].set_visible(False)
+    
+    #with warnings.catch_warnings():
+    #    warnings.simplefilter("ignore")
+    #    ax[3].set(xlim = (0, line_extent), ylim = (0, line_extent))
 
     plt.tight_layout()
     return ax
@@ -68,6 +85,7 @@ def plot_chromatin_differential(
     differential_palette = 'coolwarm',
     height = 3,
     aspect = 1.3, 
+    differential_vmin = -3, differential_vmax = 3,
     size = 1, *,
     gene_names,
     umap,
@@ -97,6 +115,8 @@ def plot_chromatin_differential(
         ))
 
         _plot_chromatin_differential(ax = ax[i,:], umap = umap, expr_pallete = expr_pallete, cis_prediction_palette = cis_prediction_palette,
-            size = size, differential_palette = differential_palette, **kwargs)
+            size = size, differential_palette = differential_palette, 
+            differential_vmax = differential_vmax, differential_vmin = differential_vmin,
+            **kwargs)
 
     return ax

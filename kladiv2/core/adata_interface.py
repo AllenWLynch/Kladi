@@ -6,6 +6,7 @@ import numpy as np
 import logging
 from tqdm import tqdm
 from scipy.sparse import isspmatrix
+from scipy import sparse
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,20 @@ def add_obs_col(self, adata, output,*,colname):
     adata.obs[colname] = output
 
 
+def project_matrix(adata_index, project_features, vals):
+
+    orig_feature_idx = dict(zip(adata_index, np.arange(len(adata_index))))
+
+    original_to_imputed_map = np.array(
+        [orig_feature_idx[feature] for feature in project_features]
+    )
+
+    matrix = np.full((vals.shape[0], len(adata_index)), np.nan)
+    matrix[:, original_to_imputed_map] = vals
+
+    return matrix
+
+
 def add_imputed_vals(self, adata, output, add_layer = 'imputed'):
     
     logger.info('Added layer: ' + add_layer)
@@ -199,10 +214,10 @@ def add_topic_comps(self, adata, output, add_key = 'X_topic_compositions', add_c
         logger.info('Added cols: ' + ', '.join(cols))
         adata.obs[cols] = output
 
+
 def add_umap_features(self, adata, output, add_key = 'X_umap_features'):
     logger.info('Added key to obsm: ' + add_key)
     adata.obsm[add_key] = output
-
 
 ## ACCESSIBILITY DATA INTERFACE ##
 
@@ -226,36 +241,57 @@ def add_factor_hits_data(self, adata, output,*, factor_type):
         'in_expr_data' : [True]*len(factor_id),
     }
     adata.uns[factor_type] = meta_dict
-    '''adata.uns[factor_type + '_id'] = list(factor_id)
-    adata.uns[factor_type + '_name'] = list(factor_name)
-    adata.uns[factor_type + '_parsed_name'] = list(parsed_name)
-    adata.uns[factor_type + '_in_expr_data'] = list(np.ones(len(factor_id)).astype(bool))'''
 
     logger.info('Added key to varm: ' + factor_type + '_hits')
-    logger.info('Added key to uns: ' + factor_type + '_hits')
+    logger.info('Added key to uns: ' + factor_type)
     #logger.info('Added key to uns: ' + ', '.join([factor_type + '_' + suffix for suffix in ['id','name','parsed_name','in_expr_data']]))
+
+
+def add_factor_mask(self, adata, mask,*,factor_type):
+
+    if not factor_type in adata.uns:
+        raise KeyError('No metadata for factor type {}. User must run "find_motifs" to add motif data.'.format(factor_type))
+
+    assert(isinstance(mask, (list, np.ndarray)))
+
+    mask = list(mask)
+    assert(all([type(x) == bool for x in mask]))
+    assert(len(mask) == len(adata.uns[factor_type]['in_expr_data']))
+
+    adata.uns[factor_type]['in_expr_data'] = mask
+
+
+def get_factor_meta(self, adata, factor_type = 'motifs', mask_factors = True):
+
+    fields = ['id','name','parsed_name']
+
+    try:
+        meta_dict = adata.uns[factor_type]
+    except KeyError:
+        raise KeyError('No metadata for factor type {}. User must run "find_motifs" to add motif data.'.format(factor_type))
+
+    mask = np.array(meta_dict['in_expr_data'])
+    col_len = len(mask)
+
+    if not mask_factors:
+        mask = np.ones_like(mask).astype(bool)
+
+    metadata = [
+        list(np.array(meta_dict[field])[mask])
+        for field in fields
+    ]
+
+    metadata = list(zip(*metadata))
+    metadata = [dict(zip(fields, v)) for v in metadata]
+
+    return metadata, mask
 
 
 def get_factor_hits(self, adata, factor_type = 'motifs', mask_factors = True):
 
     try:
-        fields = ['id','name','parsed_name']
 
-        meta_dict = adata.uns[factor_type]
-
-        mask = np.array(meta_dict['in_expr_data'])
-        col_len = len(mask)
-
-        if not mask_factors:
-            mask = np.ones_like(mask).astype(bool)
-
-        metadata = [
-            list(np.array(meta_dict[field])[mask])
-            for field in fields
-        ]
-
-        metadata = list(zip(*metadata))
-        metadata = [dict(zip(fields, v)) for v in metadata]
+        metadata, mask = get_factor_meta(None, adata, factor_type = factor_type, mask_factors = mask_factors)
 
         hits_matrix = adata[:, self.features].varm[factor_type + '_hits'].T.tocsr()
         hits_matrix = hits_matrix[mask, :]
@@ -330,7 +366,7 @@ def add_peak_gene_distances(self, adata, output):
     logger.info('Added key to uns: distance_to_TSS_genes')
 
 
-def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : None, 
+def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output, **kwargs : None, 
     bar_desc = '', include_factor_data = False):
 
     def wrap_fn(func):
@@ -342,6 +378,8 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
             pass
 
         func_signature = inspect.signature(func).parameters.copy()
+        func_signature.pop('model')
+        func_signature.pop('features')
         
         if include_factor_data:
             rp_signature = isd_signature
@@ -427,13 +465,52 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output : No
                         **kwargs)
                 )
 
-            return adata_adder(self, expr_adata, atac_adata, results)
+            return adata_adder(self, expr_adata, atac_adata, results, )
 
         return get_RP_model_features
 
     return wrap_fn
 
+
+def add_isd_results(self, expr_adata, atac_adata, output, factor_type = 'motifs', **kwargs):
+
+    ko_logp, informative_samples = list(zip(*output))
+
+    factor_mask = atac_adata.uns[factor_type]['in_expr_data']
+    
+    ko_logp = np.vstack(ko_logp).T
+    informative_samples = np.vstack(informative_samples).T
+
+    ko_logp = project_matrix(expr_adata.var_names, self.genes, ko_logp)
+
+    projected_ko_logp = np.full((len(factor_mask), ko_logp.shape[-1]), np.nan)
+    projected_ko_logp[np.array(factor_mask), :] = ko_logp
+    
+    expr_adata.varm[(factor_type, 'prob_deletion')] = projected_ko_logp.T
+    logger.info("Added key to varm: ('{}','prob_deletion')".format(factor_type))
+
+    informative_samples = project_matrix(expr_adata.var_names, self.genes, informative_samples)
+    informative_samples = np.where(~np.isnan(informative_samples), informative_samples, 0)
+    expr_adata.layers['informative_samples'] = sparse.csr_matrix(informative_samples)
+    logger.info('Added key to layers: informative_samples')
+
+
 ## PSEUDOTIME STUFF ##
+
+def fetch_diffmap_eigvals(self, adata, diffmap_key = 'X_diffmap'):
+    return dict(
+        diffmap = adata.obsm[diffmap_key],
+        eig_vals = adata.uns['diffmap_evals']
+    )
+
+
+def add_diffmap(self, adata, output, diffmap_key = 'X_diffmap'):
+    logging.info('Added key to obsm: {}, normalized diffmap with {} components.'.format(
+        diffmap_key,
+        str(output.shape[-1])
+    ))
+    adata.obsm[diffmap_key] = output
+
 
 def fetch_diffmap_distances(self, adata, diffmap_distances_key = 'X_diffmap'):
 
@@ -450,7 +527,6 @@ You must calculate a diffusion map for the data, and get diffusion-based distanc
             
             '''
         )
-
     return dict(distance_matrix = distance_matrix, diffmap = diffmap)
 
 
@@ -489,6 +565,7 @@ def fetch_tree_state_args(self, adata):
         )
     except KeyError:
         raise KeyError('One of the required pieces to run this function is not present. Make sure you\'ve first run "get_transport_map" and "get_branch_probabilities".')
+
 
 def add_tree_state_args(self, adata, output):
 
@@ -622,3 +699,75 @@ def fetch_differential_plot(self, adata, counts_layer = None, genes = None):
     r['gene_names'] = genes
 
     return r
+
+
+def fetch_streamplot_data(self, adata, 
+        data = None,
+        layers = None, 
+        pseudotime_key = 'mira_pseudotime',
+        group_key = 'tree_states',
+        tree_graph_key = 'connectivities_tree', 
+        group_names_key = 'tree_state_names',
+    ):
+
+    if data is None:
+        raise Exception('"data" must be names of columns to plot, not None')
+        
+    if isinstance(data, str):
+        data = [data]
+    else:
+        assert(isinstance(data, list))
+
+    if isinstance(layers, list):
+        assert(len(layers) == len(data))
+    else:
+        layers = [layers] * len(data)
+
+    if len(set(layers)) > 1 and len(data) > len(set(data)): #multiple layer types, nonunique gene labels
+        feature_labels = [
+            '{}: {}'.format(col, layer) if not layer is None else col
+            for col, layer in zip(data, layers)
+        ]
+    else:
+        feature_labels = data
+
+    tree_graph = None
+    try:
+        tree_graph = adata.uns[tree_graph_key]
+    except KeyError:
+        logger.warn(
+            'User must run "get_tree_structure" or provide a connectivities matrix of size (groups x groups) to specify tree layout. Plotting without tree structure'
+        )
+
+    group_names = None
+    try:
+        group_names = adata.uns[group_names_key]
+    except KeyError:
+        logger.warn(
+            'No group names provided. Assuming groups are named 0,1,...N'
+        )
+
+    pseudotime = adata.obs_vector(pseudotime_key)
+    group = adata.obs_vector(group_key)
+
+    columns = [
+        adata.obs_vector(col, layer = layer)[:, np.newaxis]
+        for col, layer in zip(data, layers)
+    ]
+
+    numeric_col = [np.issubdtype(col.dtype, np.number) for col in columns]
+
+    assert(
+        all(numeric_col) or not any(numeric_col)
+    ), 'All plotting features must be either numeric or nonnumeric. Cannot mix.'
+
+    features = np.hstack(columns)
+
+    return dict(
+        pseudotime = pseudotime,
+        tree_graph = tree_graph,
+        group_names = group_names,
+        group = group,
+        features = features,
+        feature_labels = feature_labels,
+    )

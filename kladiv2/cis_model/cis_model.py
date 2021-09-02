@@ -50,13 +50,14 @@ def mean_default_init_to_value(
         return fallback(site)
     raise ValueError(f"No init strategy specified for site {repr(site['name'])}")
 
-class CisModeler:
+
+class BaseModel:
 
     def __init__(self,*,
         expr_model, 
         accessibility_model, 
-        learning_rate = 1, 
-        genes = None,
+        genes,
+        learning_rate = 1,
         use_trans_features = False,
         counts_layer = None,
         initialization_model = None):
@@ -77,7 +78,8 @@ class CisModeler:
             try:
                 init_params = initialization_model.get_model(gene).posterior_map
             except (IndexError, AttributeError):
-                pass
+                if use_trans_features:
+                    logger.warn('No initialization model found for gene {}.'.format(gene))
 
             self.models.append(
                 GeneCisModel(
@@ -179,7 +181,7 @@ class CisModeler:
         self.models = [model for fit, model in zip(was_fit, self.models) if fit]
         return self
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output : self.subset_fit_models(output), bar_desc = 'Fitting models')
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output, **kwargs : self.subset_fit_models(output), bar_desc = 'Fitting models')
     def fit(self, model, features, callback = None):
         try:
             model.fit(features)
@@ -192,39 +194,65 @@ class CisModeler:
 
         return model.was_fit
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output : np.array(output).sum(), bar_desc = 'Scoring')
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output, **kwargs: np.array(output).sum(), bar_desc = 'Scoring')
     def score(self, model, features):
         return model.score(features)
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output: \
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output, **kwargs: \
         add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_prediction'), bar_desc = 'Predicting expression')
     def predict(self, model, features):
         return model.predict(features)
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output: \
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output, **kwargs: \
         add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_logp'), bar_desc = 'Getting logp(Data)')
     def get_logp(self, model, features):
         return model.get_logp(features)
 
-    @wraps_rp_func(lambda self, expr_adata, atac_data, output: \
+    @wraps_rp_func(lambda self, expr_adata, atac_data, output, **kwargs: \
         add_imputed_vals(self, expr_adata, np.hstack(output), add_layer = self.model_type + '_samples'))
     def _sample_posterior(self, model, features, site = 'prediction'):
         return model.to_numpy(model.get_posterior_sample(features, site))[:, np.newaxis]
 
-    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, bar_desc = 'Formatting features')
+    @wraps_rp_func(lambda self, expr_adata, atac_adata, output, **kwargs : output, bar_desc = 'Formatting features')
     def get_features(self, model, features):
         return features
 
-    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, 
+    @wraps_rp_func(lambda self, expr_adata, atac_adata, output, **kwargs : output, 
         bar_desc = 'Formatting features', include_factor_data = True)
     def get_isd_features(self, model, features,*,hits_matrix, metadata):
         return features
 
-    @wraps_rp_func(lambda self, expr_adata, atac_adata, output : output, 
+    @wraps_rp_func(add_isd_results, 
         bar_desc = 'Predicting TF influence', include_factor_data = True)
     def probabalistic_ISD(self, model, features,*,hits_matrix, metadata):
         return model.probabalistic_ISD(features, hits_matrix)
 
+
+class CisModel(BaseModel):
+
+    def __init__(self,*, expr_model, accessibility_model, genes, learning_rate = 1, counts_layer = None):
+        super().__init__(
+            expr_model = expr_model, 
+            accessibility_model = accessibility_model, 
+            genes = genes,
+            learning_rate = learning_rate,
+            use_trans_features = False, 
+            initialization_model = None
+        )
+
+class TransModel(BaseModel):
+
+    def __init__(self,*, expr_model, accessibility_model, genes, learning_rate = 1, 
+        counts_layer = None, initialization_model = None):
+        super().__init__(
+            expr_model = expr_model, 
+            accessibility_model = accessibility_model, 
+            genes = genes,
+            learning_rate = learning_rate,
+            use_trans_features = True, 
+            initialization_model = initialization_model
+        )
+        
 
 class GeneCisModel:
 
@@ -472,6 +500,48 @@ class GeneCisModel:
             for k, v in self.posterior_map.items()
         }
 
+
+    @staticmethod
+    def _select_informative_samples(expression, n_bins = 20, n_samples = 1000, seed = 2556):
+        '''
+        Bin based on contribution to overall expression, then take stratified sample to get most informative cells.
+        '''
+        np.random.seed(seed)
+
+        expression = np.ravel(expression)
+        assert(np.all(expression >= 0))
+
+        expression = np.log1p(expression)
+        expression += np.mean(expression)
+
+        sort_order = np.argsort(-expression)
+
+        cummulative_counts = np.cumsum(expression[sort_order])
+        counts_per_bin = expression.sum()/(n_bins - 1)
+        
+        samples_per_bin = n_samples//n_bins
+        bin_num = cummulative_counts//counts_per_bin
+        
+        differential = 0
+        informative_samples = []
+        for _bin, _count in zip(*np.unique(bin_num, return_counts = True)):
+
+            take_samples = samples_per_bin + differential
+            if _count < take_samples:
+                informative_samples.append(
+                    sort_order[bin_num == _bin]
+                )
+                differential = take_samples - _count
+
+            else:
+                differential = 0
+                informative_samples.append(
+                    np.random.choice(sort_order[bin_num == _bin], size = take_samples, replace = False)
+                )
+
+        return np.concatenate(informative_samples)
+
+
     @staticmethod
     def _prob_ISD(hits_matrix,*, upstream_weights, downstream_weights, 
         promoter_weights, upstream_idx, promoter_idx, downstream_idx,
@@ -525,12 +595,25 @@ class GeneCisModel:
         return logp_data[0] - logp_data[1:]
 
 
-    def probabalistic_ISD(self, features, hits_matrix):
+    def probabalistic_ISD(self, features, hits_matrix, n_samples = 1000, n_bins = 20):
+
+        informative_samples = self._select_informative_samples(features['gene_expr'], 
+            n_bins = n_bins, n_samples = n_samples)
+
+        N = len(features['gene_expr'])
+        for k in 'gene_expr,upstream_weights,downstream_weights,promoter_weights,softmax_denom,read_depth,trans_features'.split(','):
+            features[k] = features[k][informative_samples]
+
+        samples_mask = np.zeros(N)
+        samples_mask[informative_samples] = 1
+        samples_mask = samples_mask.astype(bool)
+        
         return self._prob_ISD(
             hits_matrix, **features, 
             params = self.get_normalized_params(), 
             bn_eps= self.bn.eps
-        )
+        ), samples_mask
+
 
 def main(*,atac_adata, rna_adata, expr_model, accessibility_model, genes, save_prefix,
             learning_rate = 1., gene_start_idx = 0, use_trans_features = False):

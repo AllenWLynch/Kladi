@@ -216,12 +216,22 @@ def _get_swarm_colors(*, ax, features, palette, show_legend, hue_order):
     return colors
 
 
-def _plot_swarm_segment(is_leaf = False, centerline = 0, palette = 'inferno', feature_labels = None, linecolor = 'lightgrey', 
-    linewidth = 0.1, hue_order = None, show_legend = True, size = 2, is_root = True,
+def _plot_swarm_segment(is_leaf = False, centerline = 0, palette = 'inferno', feature_labels = None, linecolor = 'black', 
+    linewidth = 0.1, hue_order = None, show_legend = True, size = 15, is_root = True, max_swarm_density = 2000,
         color = 'black', min_pseudotime = 0., max_bar_height = 0.5,*, ax, features, pseudotime, cell_colors, **kwargs,):
     
     features = np.ravel(features)
     assert(len(features) == len(pseudotime))
+
+    swarm_density = len(features)/(pseudotime.max() - pseudotime.min())
+
+    if swarm_density > max_swarm_density:
+        downsample_rate = max_swarm_density/swarm_density
+        downsample_mask = np.random.rand(len(features)) < downsample_rate
+
+        features = features[downsample_mask]
+        pseudotime = pseudotime[downsample_mask]
+        cell_colors = cell_colors[downsample_mask]
     
     plot_order = features.argsort()
     points = ax.scatter(

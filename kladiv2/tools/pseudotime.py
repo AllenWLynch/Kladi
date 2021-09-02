@@ -73,7 +73,25 @@ def get_dendogram_levels(G):
 
 ### ___ PALANTIR FUNCTIONS ____ ##
 
+@adi.wraps_functional(
+    adata_extractor = adi.fetch_diffmap_eigvals, adata_adder = adi.add_diffmap,
+    del_kwargs = ['diffmap','eig_vals']
+)
+def normalize_diffmap(*,diffmap, eig_vals):
+
+    num_comps = np.maximum(np.argmax(eig_vals[:-1] - eig_vals[1:]), 3)
+    diffmap = diffmap[:, 1:num_comps]
+    diffmap/=np.linalg.norm(diffmap, axis = 0, keepdims = True)
+    
+    eig_vals = eig_vals[1:num_comps]
+    diffmap *= (eig_vals / (1 - eig_vals))[np.newaxis, :]
+
+    return diffmap
+
+
 def sample_waypoints(num_waypoints = 3000,*, diffmap):
+
+    np.random.seed(2556)
 
     waypoint_set = list()
     no_iterations = int((num_waypoints) / diffmap.shape[1])
@@ -107,12 +125,11 @@ def sample_waypoints(num_waypoints = 3000,*, diffmap):
 
     return waypoints
 
-
 def get_pseudotime(max_iterations = 25, n_waypoints = 3000, n_jobs = -1,*, start_cell, distance_matrix, diffmap):
 
     assert(isinstance(max_iterations, int) and max_iterations > 0)
     N = distance_matrix.shape[0]
-    cells = sample_waypoints(num_waypoints=n_waypoints, diffmap = diffmap)
+    cells = np.union1d(sample_waypoints(num_waypoints=n_waypoints, diffmap = diffmap), np.array([start_cell]))
 
     ####
 
@@ -186,7 +203,7 @@ def make_markov_matrix(affinity_matrix):
     return markov_matrix
 
 
-def get_adaptive_affinity_matrix(ka = 10,*, distance_matrix, pseudotime):
+def get_kernel_width(ka, distance_matrix):
 
     N = distance_matrix.shape[0]
     distance_matrix = distance_matrix.tocsr()
@@ -201,32 +218,35 @@ def get_adaptive_affinity_matrix(ka = 10,*, distance_matrix, pseudotime):
     #ka_index = np.minimum(np.argmin(~np.isinf(sorted_dist), axis = 1) - 1, ka)
     kernel_width = sorted_dist[:, ka]
 
-    #finite_mean = kernel_width[np.isfinite(kernel_width)].mean()
-    #kernel_width = np.where(np.isinf(kernel_width), finite_mean, kernel_width)
-    kernel_width = kernel_width
-    delta_pseudotime = np.abs(pseudotime[i] - pseudotime[j])
+    return kernel_width
+
+
+def prune_edges(*,kernel_width, distance_matrix, pseudotime):
     
-    affinity = np.exp(
-        -(d ** 2) / (kernel_width[i] * delta_pseudotime) * 0.5
-        -(d ** 2) / (kernel_width[j] * delta_pseudotime) * 0.5
-    )
-    affinity_matrix = sparse.csr_matrix((affinity, (i, j)), [N,N])
-
-    return affinity_matrix, kernel_width#, ka_index
-
-
-def prune_backwards_affinities(*, distance_matrix, affinity_matrix, kernel_width, pseudotime):
-
-    distance_matrix = distance_matrix.tocsr()
     N = distance_matrix.shape[0]
     j, i, d = sparse.find(distance_matrix.T)
 
     delta_pseudotime = pseudotime[i] - pseudotime[j]
-
     rem_edges = delta_pseudotime > kernel_width[i]
-    d[rem_edges] = 0
+    
+    d[rem_edges] = np.inf
 
-    affinity_matrix = sparse.coo_matrix((d, (i,j)), (N,N)).tocsr()
+    distance_matrix = sparse.csr_matrix((d, (i, j)), [N,N])
+    
+    return distance_matrix
+
+
+def get_adaptive_affinity_matrix(*,kernel_width, distance_matrix, pseudotime = None):
+
+    N = distance_matrix.shape[0]
+    j, i, d = sparse.find(distance_matrix.T)
+
+    affinity = np.exp(
+        -(d ** 2) / kernel_width[i]**2 * 0.5
+        -(d ** 2) / kernel_width[j]**2 * 0.5
+    )
+
+    affinity_matrix = sparse.csr_matrix((affinity, (i, j)), [N,N])
     affinity_matrix.eliminate_zeros()
 
     return affinity_matrix
@@ -234,21 +254,21 @@ def prune_backwards_affinities(*, distance_matrix, affinity_matrix, kernel_width
 
 @adi.wraps_functional(
     adata_extractor = adi.fetch_diffmap_distances, adata_adder = adi.add_transport_map,
-    del_kwargs = ['distance_matrix'])
+    del_kwargs = ['distance_matrix','diffmap'])
 def get_transport_map(ka = 5, n_jobs = -1,*, start_cell, distance_matrix, diffmap):
 
     logger.info('Calculating diffusion pseudotime ...')
     pseudotime = get_pseudotime(n_jobs = n_jobs, start_cell= start_cell, 
         distance_matrix = distance_matrix, diffmap = diffmap)
 
-    logger.info('Calculating transport map ...')
-    affinity_matrix, kernel_width = get_adaptive_affinity_matrix(ka = ka, 
-        distance_matrix = distance_matrix, pseudotime = pseudotime)
+    kernel_width = get_kernel_width(ka, distance_matrix)
 
-    affinity_matrix = prune_backwards_affinities(
-        distance_matrix = distance_matrix, affinity_matrix = affinity_matrix,
-        kernel_width = kernel_width, pseudotime = pseudotime
-    )
+    distance_matrix = prune_edges(kernel_width = kernel_width, 
+        pseudotime = pseudotime, distance_matrix = distance_matrix)
+
+    logger.info('Calculating transport map ...')
+    affinity_matrix = get_adaptive_affinity_matrix(kernel_width = kernel_width,
+        distance_matrix = distance_matrix)
 
     transport_map = make_markov_matrix(affinity_matrix)
 

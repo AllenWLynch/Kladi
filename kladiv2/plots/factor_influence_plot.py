@@ -45,7 +45,7 @@ def layout_labels(*, ax, x, y, label, label_closeness = 5, fontsize = 11, max_re
     return ax
 
 def plot_factor_influence(ax, l1_pvals, l2_pvals, factor_names, pval_threshold = (1e-5, 1e-5), 
-    hue = None, palette = 'coolwarm', legend_label = '', hue_order = None, show_legend = True,
+    hue = None, palette = 'coolwarm', legend_label = '', hue_order = None, show_legend = True, na_color = 'lightgrey',
     label_closeness = 2, max_label_repeats = 1, axlabels = ('list1', 'list2'), color = 'grey', fontsize = 12, interactive = False):
 
     if not hue is None:
@@ -53,10 +53,10 @@ def plot_factor_influence(ax, l1_pvals, l2_pvals, factor_names, pval_threshold =
         assert(len(hue) == len(factor_names))
         
         cell_colors = map_colors(ax, hue, palette, 
-            add_legend = show_legend, hue_order = hue_order, 
-            cbar_kwargs = dict(location = 'right', pad = 0.01, shrink = 0.5, aspect = 15, anchor = (1.05, 0.5), label = legend_label),
-            legend_kwargs = dict(loc="upper right", markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large',
-                        bbox_to_anchor=(1.05, 0.5), label = legend_label))
+            add_legend = show_legend, hue_order = hue_order, na_color = na_color,
+            cbar_kwargs = dict(location = 'right', pad = 0.01, shrink = 0.5, aspect = 15, label = legend_label),
+            legend_kwargs = dict(loc= "center left", bbox_to_anchor = (1.05, 0.5), 
+                markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large', title = legend_label))
     else:
         cell_colors = color
 
@@ -79,6 +79,9 @@ def plot_factor_influence(ax, l1_pvals, l2_pvals, factor_names, pval_threshold =
         ax.set(xlabel = axlabels[0], ylabel = axlabels[1])
         ax.spines["right"].set_visible(False)
         ax.spines["top"].set_visible(False)
+
+        plt.tight_layout()
+
         return ax
     else:
         raise NotImplementedError()

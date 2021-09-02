@@ -117,6 +117,8 @@ class BaseModel(torch.nn.Module, BaseEstimator):
 
         if 'pi' in old_model['model']:
             model.residual_pi = old_model['model']['pi']
+
+        model.enrichments = {}
         
         return model
 

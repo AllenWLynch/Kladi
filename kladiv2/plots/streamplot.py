@@ -26,24 +26,28 @@ def _plot_fill(is_top = False,*, ax, time, fill_top, fill_bottom, color, linecol
             ax.plot(time, fill_bottom, color = linecolor, linewidth = linewidth)
 
 
-def _plot_stream_segment(is_leaf = True, centerline = 0, window_size = 101, hide_feature_threshold = 0.05, center_baseline = True, is_root = True,
-        palette = 'Set3', linecolor = 'lightgrey', linewidth = 0.1, feature_labels = None, hue_order = None, show_legend = True, max_bar_height = 0.5,
-        color = 'black', min_pseudotime = 0., size=20, lineage_name = '', segment_connection = None,*, ax, features, pseudotime, **kwargs,):
+def _plot_stream_segment(is_leaf = True, centerline = 0, window_size = 101,center_baseline = True, is_root = True,
+        palette = 'Set3', linecolor = 'black', linewidth = 0.1, feature_labels = None, hide_feature_threshold = 0,
+        hue_order = None, show_legend = True, max_bar_height = 0.6,
+        color = 'black', segment_connection = None,*, ax, features, pseudotime, **kwargs,):
 
     if (features.shape) == 1:
         features = features[:, np.newaxis]
 
-    num_features = features.shape[-1]
-    if not feature_labels is None:
-        assert(len(feature_labels) == num_features)
-    else:
+    num_samples, num_features = features.shape
+    max_windowsize = num_samples - 1
+    if max_windowsize % 2 == 0:
+        max_windowsize-=1
+
+    if feature_labels is None:
         feature_labels = np.arange(num_features).astype(str)
 
+    features = np.where(features < hide_feature_threshold, 0., features)
+
     features = features[np.argsort(pseudotime)] #sort by time
-    features = savgol_filter(features, window_size, 1, axis = 0) #smooth
+    features = savgol_filter(features, min(window_size, max_windowsize), 1, axis = 0) #smooth
     ascending_time = pseudotime[np.argsort(pseudotime)] #sort time
 
-    features = np.where(features < hide_feature_threshold, 0., features)
     features = np.cumsum(features, axis=-1)
     
     if center_baseline:
@@ -66,12 +70,17 @@ def _plot_stream_segment(is_leaf = True, centerline = 0, window_size = 101, hide
     if num_features == 1:
         _plot_fill(is_top=True, fill_top= feature_fill_positions[:,0], fill_bottom = feature_bottom, color = color, **plot_kwargs)
     else:
+
+        not_all_zeros = ~np.all(features <= hide_feature_threshold, axis = 0)
+
         for i, color in enumerate(
                 map_colors(ax, feature_labels[::-1], add_legend = is_root and show_legend, hue_order = hue_order[::-1] if not hue_order is None else None, legend_kwargs = legend_params,
                           palette = palette)
             ):
-            _plot_fill(is_top = i == 0, fill_top= feature_fill_positions[:, num_features - 1 - i], fill_bottom = feature_bottom, 
-                color = color, **plot_kwargs)
+            col_num = num_features - 1 - i
+            if not_all_zeros[col_num]:
+                _plot_fill(is_top = i == 0, fill_top= feature_fill_positions[:, col_num], fill_bottom = feature_bottom, 
+                    color = color, **plot_kwargs)
 
     #box in borderlines
     ax.vlines(ascending_time[0], ymin = feature_bottom[0], ymax = feature_fill_positions[0, -1], 
@@ -81,21 +90,23 @@ def _plot_stream_segment(is_leaf = True, centerline = 0, window_size = 101, hide
         color = linecolor, linewidth = linewidth)
 
 
-def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_root = True,
-        palette = 'Set3', linecolor = 'lightgrey', linewidth = 0.1, feature_labels = None, hue_order = None, show_legend = True, size = 2,
-        color = 'black', min_pseudotime = 0., max_bar_height = 0.5,*, ax, features, pseudotime, **kwargs,):
+def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_root = True, size = 3, show_points = True,
+        palette = 'Set3', linecolor = 'black', linewidth = 0.5, feature_labels = None, hue_order = None, show_legend = True, 
+        color = 'black', max_bar_height = 0.6,*, ax, features, pseudotime, **kwargs,):
     
     if (features.shape) == 1:
         features = features[:, np.newaxis]
 
-    num_features = features.shape[-1]
-    if not feature_labels is None:
-        assert(len(feature_labels) == num_features)
-    else:
+    num_samples, num_features = features.shape
+    max_windowsize = num_samples - 1
+    if max_windowsize % 2 == 0:
+        max_windowsize-=1
+
+    if feature_labels is None:
         feature_labels = np.arange(num_features).astype(str)
 
     features = features[np.argsort(pseudotime)] #sort by time
-    smoothed_features = savgol_filter(features, window_size, 1, axis = 0) #smooth
+    smoothed_features = savgol_filter(features, min(window_size, max_windowsize), 1, axis = 0) #smooth
     ascending_time = pseudotime[np.argsort(pseudotime)] #sort time
 
     legend_params = dict(loc="center left", markerscale = 1, frameon = False, title_fontsize='x-large', fontsize='large',
@@ -104,27 +115,30 @@ def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_
     min_time, max_time = pseudotime.min(), pseudotime.max()
     centerline -= max_bar_height/2
     
-    def scatter(features, smoothed_features, color):
+    def scatter(features, smoothed_features, _color):
 
-        ax.scatter(
-            ascending_time,
-            centerline + features,
-            color = color,
-            s = size
-        )
-        ax.spines['right'].set_visible(False)
-        ax.spines['top'].set_visible(False)
-        ax.set(xticks = [], yticks = [])
-        
+        if show_points:
+            ax.scatter(
+                ascending_time,
+                centerline + features,
+                color = _color,
+                s = size
+            )
+
         ax.plot(
             ascending_time,
             smoothed_features + centerline,
-            color = color, 
-            alpha = 0.5,
+            color = _color, 
+            linewidth = np.sqrt(size),
+            alpha = 0.5 if show_points else 1,
         )
         
         ax.vlines(min_time, ymin = centerline, ymax = centerline + max_bar_height, color = linecolor, linewidth = linewidth)
         ax.vlines(max_time, ymin = centerline, ymax = centerline + max_bar_height, color = linecolor, linewidth = linewidth)
+
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+        ax.set(xticks = [], yticks = [])
         #ax.hlines(centerline, xmin = min_time, xmax = max_time, color = linecolor, linewidth = linewidth)
     
     if num_features == 1:
@@ -132,10 +146,12 @@ def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_
         
     else:
         for i, color in enumerate(
-                map_colors(ax, feature_labels[::-1], add_legend = is_root and show_legend, hue_order = hue_order[::-1] if not hue_order is None else None, legend_kwargs = legend_params,
-                          palette = palette)
+                map_colors(ax, feature_labels[::-1], add_legend = is_root and show_legend, 
+                    hue_order = hue_order[::-1] if not hue_order is None else None, 
+                    legend_kwargs = legend_params,
+                    palette = palette)
             ):
-            scatter(features[:,i], smoothed_features[:,num_features - 1 - i], color)
+            scatter(features[:, num_features - 1 - i], smoothed_features[:, num_features - 1 - i], color)
             
 
     
@@ -158,8 +174,10 @@ def _build_tree(cell_colors = None, size = None, shape = None,*, ax, features, p
     nx_graph = nx.convert_matrix.from_numpy_array(tree_graph)
 
     max_times, min_times = {}, {}
-    max_times[source] = 0
-    min_times[source] = 0
+    max_times[source] = pseudotime.min()
+    min_times[source] = pseudotime.min()
+
+    has_plotted = False
     for i, (start_clus, end_clus) in enumerate(
             [(source, source), *nx.algorithms.traversal.bfs_edges(nx_graph, source)]
         ):
@@ -187,32 +205,21 @@ def _build_tree(cell_colors = None, size = None, shape = None,*, ax, features, p
                 total_elapsed = max(max_time - min_time, min_pseudotime if is_leaf else 0.)
                 segment_pseudotime = minmax_scale(segment_pseudotime) * total_elapsed + min_time'''
 
-            plot_fn(features = segment_features, pseudotime = segment_pseudotime, is_leaf = segment_is_leaf, is_root = i == 1,ax = ax,
+            plot_fn(features = segment_features, pseudotime = segment_pseudotime, is_leaf = segment_is_leaf, is_root = not has_plotted, ax = ax,
                 centerline = centerline, lineage_name = lineage_names[end_clus], segment_connection = connection, cell_colors = segment_cell_colors)
+
+            has_plotted = True
+
+        else:
+            max_times[end_clus] = pseudotime.min()
+            min_times[end_clus] = pseudotime.min()
+
 
     ax.set(ylim = (-0.5, max(centerlines.values()) + 0.75))
     ax.axis('off')
-    
 
+def _normalize_numerical_features(features,*, clip, scale_features, max_bar_height, style):
 
-def plot_stream(color = 'black', log_pseudotime = True, figsize = (20,10), hue_order = None,
-    scale_features = False, center_baseline = True, window_size = 51, palette = 'Set3', ax=None, title = None, show_legend = True,
-    max_bar_height = 0.8, hide_feature_threshold = 0.03, linecolor = 'grey', linewidth = 0.2, clip = 10,
-    min_pseudotime = 0.05, split = False, plots_per_row = 4, height = 3, aspect = 1.5, style = 'stream', size = 2,
-    feature_labels = None, tree_structure = True, scaffold_linecolor = 'lightgrey', scaffold_linewidth = 2,
-    group_names = None, *, features, pseudotime, group, tree_graph):
-
-    assert(isinstance(max_bar_height, float) and max_bar_height > 0 and max_bar_height < 1)
-    assert(isinstance(features, np.ndarray))
-    
-    if len(features.shape) == 1:
-        features = features[:,np.newaxis]
-    assert(len(features.shape) == 2)
-    
-    num_features = features.shape[-1]
-    #assert(np.issubdtype(features.dtype, np.number))
-    
-    ## NORMALIZE FEATURES ACROSS PLOTS AND SEGMENTS ##
     if not clip is None:
         means, stds = features.mean(0, keepdims = True), features.std(0, keepdims = True)
         clip_min, clip_max = means - clip*stds, means + clip*stds
@@ -231,11 +238,50 @@ def plot_stream(color = 'black', log_pseudotime = True, figsize = (20,10), hue_o
         features = features/(features.sum(-1).max()) * max_bar_height
     elif style == 'scatter':
         features = features/(features.max(0)) * max_bar_height
+
+    return features
+    
+
+@adi.wraps_functional(
+    adata_extractor  = adi.fetch_streamplot_data,
+    del_kwargs = ['group_names','features','pseudotime','group','tree_graph', 'feature_labels']
+)
+def plot_stream(style = 'stream', split = False, log_pseudotime = True, scale_features = False, 
+    title = None, show_legend = True, max_bar_height = 0.6, size = None, max_swarm_density = 2000, hide_feature_threshold = 0,
+    palette = 'Set2', color = 'black', linecolor = 'black', linewidth = None, hue_order = None, 
+    scaffold_linecolor = 'lightgrey', scaffold_linewidth = 1, min_pseudotime = 0.05,
+    figsize = (10,5), ax = None, plots_per_row = 4, height = 4, aspect = 1.3, tree_structure = True,
+    center_baseline = True, window_size = 101, clip = 10,
+    feature_labels = None, group_names = None, tree_graph = None,*, features, pseudotime, group):
+
+    assert(isinstance(max_bar_height, float) and max_bar_height > 0 and max_bar_height < 1)
+    assert(isinstance(features, np.ndarray))
+    assert(style in ['line','scatter','stream','swarm'])
+
+    show_points = True
+    if style == 'line':
+        style = 'scatter'
+        show_points = False
+
+    if style in ['stream','scatter']:
+        assert(np.issubdtype(features.dtype, np.number)), 'Only "swarm" style can plot categorical/non-numeric data.'
+    
+    if len(features.shape) == 1:
+        features = features[:,np.newaxis]
+    assert(len(features.shape) == 2)
+    num_features = features.shape[-1]
+    
+    if np.issubdtype(features.dtype, np.number):
+            features = _normalize_numerical_features(features, clip = clip, 
+                scale_features = scale_features, max_bar_height = max_bar_height, style = style)
     
     ##
+    if group_names is None:
+        if not tree_graph is None:
+            group_names = list(np.arange(tree_graph.shape[-1]).astype(str))
 
-    if group_names is None and not tree_graph is None:
-        group_names = list(np.arange(tree_graph.shape[-1]).astype(str))
+    if tree_graph is None:
+        tree_structure = False
 
     if feature_labels is None:
         feature_labels = list(np.arange(features.shape[-1]).astype(str))
@@ -245,10 +291,11 @@ def plot_stream(color = 'black', log_pseudotime = True, figsize = (20,10), hue_o
         min_pseudotime = np.log(min_pseudotime + 1)
 
     segment_kwargs = dict(
-        window_size = window_size, hide_feature_threshold = hide_feature_threshold, center_baseline = center_baseline,
+        window_size = window_size, center_baseline = center_baseline, hide_feature_threshold = hide_feature_threshold,
         palette = palette, linecolor = linecolor, linewidth = linewidth, hue_order = hue_order, show_legend = show_legend,
-        color = color, size = size, max_bar_height = max_bar_height,
+        color = color, size = size, max_bar_height = max_bar_height, max_swarm_density = max_swarm_density, show_points = show_points,
     )
+    segment_kwargs = {k : v for k, v in segment_kwargs.items() if not v is None} #eliminate None values to allow segment functions to fill default values
     
     scaffold_kwargs = dict(linecolor = scaffold_linecolor, linewidth = scaffold_linewidth)
 
@@ -273,15 +320,17 @@ def plot_stream(color = 'black', log_pseudotime = True, figsize = (20,10), hue_o
         segment_fn = partial(plot_fn, feature_labels = feature_labels, **segment_kwargs)
 
         if tree_structure:
-            _build_tree(**build_tree_kwargs, features = features, ax = ax, plot_fn=segment_fn)
             _build_tree(**build_tree_kwargs, features = features, ax = ax, plot_fn= scaffold_fn)
-
+            _build_tree(**build_tree_kwargs, features = features, ax = ax, plot_fn=segment_fn)
+            
         else:
             segment_fn(features = features, pseudotime = pseudotime, is_leaf = False, ax = ax,
                 centerline = 0, lineage_name = '', segment_connection = None)
+            ax.axis('off')
     
 
     fig = None
+
     if num_features == 1 or (not split and style in ['stream','scatter']):
         
         if ax is None:
@@ -291,9 +340,7 @@ def plot_stream(color = 'black', log_pseudotime = True, figsize = (20,10), hue_o
 
         if not title is None:
             ax.set_title(str(title), fontdict= dict(fontsize = 'x-large'))
-        
-        return ax
-            
+
     else:
         
         def map_stream(ax, features, label):
