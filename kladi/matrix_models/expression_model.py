@@ -278,7 +278,7 @@ class ExpressionModel(BaseModel):
         assert(len(X.shape) == 2)
         assert(X.shape[1] == self.num_exog_features)
         
-        assert(np.isclose(X.astype(np.int64), X, 1e-3).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
+        assert(np.isclose(X.astype(np.int64), X, 1e-1).all()), 'Input data must be raw transcript counts, represented as integers. Provided data contains non-integer values.'
 
         return X.astype(np.float32)
 
