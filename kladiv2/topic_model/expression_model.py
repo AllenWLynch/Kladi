@@ -95,7 +95,7 @@ class ExpressionModel(BaseModel):
         theta_loc, theta_scale = super().model()
         pyro.module("decoder", self.decoder)
 
-        dispersion = pyro.param('dispersion', torch.ones(self.num_exog_features) * 5., constraint = constraints.positive)
+        dispersion = pyro.param('dispersion', read_depth.new_ones(self.num_exog_features) * 5., constraint = constraints.positive)
 
         with pyro.plate("cells", endog_features.shape[0]):
             

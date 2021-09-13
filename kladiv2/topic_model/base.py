@@ -209,6 +209,8 @@ class BaseModel(torch.nn.Module, BaseEstimator):
 
         self.K = torch.tensor(self.num_topics, requires_grad = False)
 
+        self.to(self.device)
+
 
     #,*, endog_features, exog_features, read_depth, anneal_factor = 1.
     def model(self):
@@ -228,9 +230,9 @@ class BaseModel(torch.nn.Module, BaseEstimator):
     def guide(self):
 
         _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
-        pseudocount_mu = pyro.param('pseudocount_mu', _counts_mu * torch.ones((self.num_topics,)), constraint = constraints.positive)
+        pseudocount_mu = pyro.param('pseudocount_mu', _counts_mu * torch.ones((self.num_topics,)).to(self.device), constraint = constraints.positive)
 
-        pseudocount_std = pyro.param('pseudocount_std', np.sqrt(_counts_var) * torch.ones((self.num_topics,)), 
+        pseudocount_std = pyro.param('pseudocount_std', np.sqrt(_counts_var) * torch.ones((self.num_topics,)).to(self.device), 
                 constraint = constraints.positive)
 
         pyro.module("encoder", self.encoder)
