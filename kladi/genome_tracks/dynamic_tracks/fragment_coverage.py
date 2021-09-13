@@ -60,7 +60,7 @@ class DynamicFragmentCov(DynamicTrack):
             barcodes = adata.obs[barcode_col].values
 
         if groupby is None:
-            SignalLane(track_id = track_id, fragment_file = fragment_file, barcodes = barcodes, 
+            FragmentCovTrack(track_id = track_id, fragment_file = fragment_file, barcodes = barcodes, 
                 norm_constant = norm_constant, **properties)
 
         groupby_vals = adata.obs[groupby].values

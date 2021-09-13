@@ -123,17 +123,28 @@ def get_motif_hits(peak_sequences_file, num_peaks, pvalue_threshold = 0.00005):
 
     logger.info('Scanning peaks for motif hits with p >= {} ...'.format(str(pvalue_threshold)))
 
+    motifs_directory = config.get('data','motifs')
+    matrix_list = [
+        os.path.basename(x) for x in
+        glob(os.path.join(motifs_directory, '*.{}'.format(config.get('jaspar','pfm_suffix'))))
+    ]
+
     command = ['moods-dna.py', 
-        '-m', *list_motif_matrices(), 
+        '-m', *matrix_list, 
         '-s', peak_sequences_file, 
         '-p', str(pvalue_threshold), 
         '--batch']
 
     logger.info('Building motif background models ...')
-    process = subprocess.Popen(' '.join(command), stdout=subprocess.PIPE, shell=True, stderr=subprocess.PIPE)
-    #process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        ' '.join(command), 
+        stdout=subprocess.PIPE, 
+        shell=True, 
+        stderr=subprocess.PIPE, 
+        cwd = motifs_directory
+    )
 
-    motif_matrices = [os.path.basename(x) for x in list_motif_matrices()]
+    motif_matrices = matrix_list #[os.path.basename(x) for x in list_motif_matrices()]
     motif_idx_map = dict(zip(motif_matrices, np.arange(len(motif_matrices))))
 
     motif_indices, peak_indices, scores = [],[],[]

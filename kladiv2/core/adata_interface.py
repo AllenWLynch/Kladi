@@ -53,6 +53,12 @@ def wraps_functional(*,
                 for arg in func_signature.keys() if arg in kwargs
             }
 
+            for kwarg in kwargs.keys():
+                if not any(
+                    [kwarg in subfunction_kwargs.keys() for subfunction_kwargs in [getter_kwargs, adder_kwargs, function_kwargs]]
+                ):
+                    raise TypeError('{} is not a valid keyword arg for this function.'.format(kwarg))
+
             output = func(**adata_extractor(None, adata, **getter_kwargs), **function_kwargs)
 
             #print(output, adata, adder_kwargs)
@@ -104,6 +110,12 @@ def wraps_modelfunc(*,
                 arg: kwargs[arg]
                 for arg in func_signature.keys() if arg in kwargs
             }
+
+            for kwarg in kwargs.keys():
+                if not any(
+                    [kwarg in subfunction_kwargs.keys() for subfunction_kwargs in [getter_kwargs, adder_kwargs, function_kwargs]]
+                ):
+                    raise TypeError('{} is not a valid keyword arg for this function.'.format(kwarg))
 
             output = func(self, **adata_extractor(self, adata, **getter_kwargs), **function_kwargs)
 
@@ -287,7 +299,7 @@ def get_factor_meta(self, adata, factor_type = 'motifs', mask_factors = True):
     return metadata, mask
 
 
-def get_factor_hits(self, adata, factor_type = 'motifs', mask_factors = True):
+def get_factor_hits(self, adata, factor_type = 'motifs', mask_factors = True, binarize = True):
 
     try:
 
@@ -295,6 +307,9 @@ def get_factor_hits(self, adata, factor_type = 'motifs', mask_factors = True):
 
         hits_matrix = adata[:, self.features].varm[factor_type + '_hits'].T.tocsr()
         hits_matrix = hits_matrix[mask, :]
+
+        if binarize:
+            hits_matrix.data = np.ones_like(hits_matrix.data)
     
     except KeyError:
         raise KeyError('User must run "find_motifs" or "find_ChIP_hits" to add binding data before running this function')
@@ -420,7 +435,8 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output, **k
 
             hits_data = dict()
             if include_factor_data:
-                hits_data = get_factor_hits(self.accessibility_model, atac_adata, factor_type = factor_type)
+                hits_data = get_factor_hits(self.accessibility_model, atac_adata, factor_type = factor_type,
+                    binarize = True)
 
             results = []
             for model in tqdm(self.models, desc = bar_desc):
@@ -465,7 +481,7 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output, **k
                         **kwargs)
                 )
 
-            return adata_adder(self, expr_adata, atac_adata, results, )
+            return adata_adder(self, expr_adata, atac_adata, results, factor_type = factor_type)
 
         return get_RP_model_features
 
@@ -486,13 +502,13 @@ def add_isd_results(self, expr_adata, atac_adata, output, factor_type = 'motifs'
     projected_ko_logp = np.full((len(factor_mask), ko_logp.shape[-1]), np.nan)
     projected_ko_logp[np.array(factor_mask), :] = ko_logp
     
-    expr_adata.varm[(factor_type, 'prob_deletion')] = projected_ko_logp.T
-    logger.info("Added key to varm: ('{}','prob_deletion')".format(factor_type))
+    expr_adata.varm[factor_type + '-prob_deletion'] = projected_ko_logp.T
+    logger.info("Added key to varm: '{}-prob_deletion')".format(factor_type))
 
     informative_samples = project_matrix(expr_adata.var_names, self.genes, informative_samples)
     informative_samples = np.where(~np.isnan(informative_samples), informative_samples, 0)
-    expr_adata.layers['informative_samples'] = sparse.csr_matrix(informative_samples)
-    logger.info('Added key to layers: informative_samples')
+    expr_adata.layers[factor_type + '-informative_samples'] = sparse.csr_matrix(informative_samples)
+    logger.info('Added key to layers: {}-informative_samples'.format(factor_type))
 
 
 ## PSEUDOTIME STUFF ##

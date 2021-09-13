@@ -8,6 +8,13 @@ import kladiv2.core.adata_interface as adi
 
 logger = logging.getLogger(__name__)
 
+
+def wide_view():
+
+    from IPython.core.display import display, HTML
+    display(HTML("<style>.container { width:100% !important; }</style>"))
+    
+
 def make_joint_representation(
     adata1, adata2,
     adata1_key = 'X_umap_features',
@@ -64,5 +71,6 @@ def mask_non_expressed_factors(atac_adata,*, expressed_genes, factor_type = 'mot
     logger.info('Found {} factors in expression data.'.format(str(np.array(factor_mask).sum())))
 
 
-def get_factor_meta(atac_adata, factor_type = 'motifs'):
-    return adi.get_factor_meta(None, atac_adata, factor_type = factor_type, mask_factors = False)[0]
+def get_factor_meta(atac_adata, factor_type = 'motifs', mask_factors = False):
+    return adi.get_factor_meta(None, atac_adata, factor_type = factor_type, 
+            mask_factors = mask_factors)[0]

@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import logging
 from scipy.sparse import isspmatrix
+from functools import wraps
 
 class PipelineException(Exception):
     pass
@@ -296,6 +297,8 @@ def fill_resources(*resources):
 
     def decorator_fill(func):
 
+        #func.__signature__ = inspect.Signature(list(getter_signature.values()))
+        @wraps(func)
         def wrapper(self, *args, **kwargs):
             
             available_resources = self.get_context().resources

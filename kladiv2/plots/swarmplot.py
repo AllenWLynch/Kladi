@@ -238,9 +238,10 @@ def _plot_swarm_segment(is_leaf = False, centerline = 0, palette = 'inferno', fe
         pseudotime[plot_order], 
         np.ones_like(pseudotime) * centerline, 
         s = size, 
-        c = cell_colors[plot_order],
+        c = cell_colors,
         edgecolors = linecolor,
         linewidths = linewidth,
     )
 
     Beeswarm(orient='h', width = max_bar_height)(points, centerline)
+    ax.axis('off')

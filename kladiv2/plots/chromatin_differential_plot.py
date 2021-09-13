@@ -20,15 +20,15 @@ def _plot_chromatin_differential(
     trans_prediction
 ):
 
-    plot_umap(umap, chromatin_differential, ax = ax[0], palette = differential_palette,
+    plot_umap(umap, chromatin_differential, ax = ax[2], palette = differential_palette,
     size = size, vmin = differential_vmin, vmax = differential_vmax, title = gene_name + ' Chromatin Differential')
 
-    plot_umap(umap, expression, palette = expr_pallete, ax = ax[1],
+    plot_umap(umap, expression, palette = expr_pallete, ax = ax[0],
         add_legend = True, size = size, title = gene_name + ' Expression',
         edgecolor = 'lightgrey', linewidths = 0.1)
 
-    plot_umap(umap, np.log(cis_prediction), palette = cis_prediction_palette, ax = ax[2],
-        size = size, title = gene_name + ' Cis Prediction')
+    plot_umap(umap, np.log(cis_prediction), palette = cis_prediction_palette, ax = ax[1],
+        size = size, title = gene_name + ' Local Prediction')
 
     plot_order = expression.argsort()
     ax[3].scatter(
@@ -45,31 +45,27 @@ def _plot_chromatin_differential(
         linewidths = 0.15,
     )
     ax[3].set(
-        title = gene_name + ' Cis vs Trans Prediction',
+        title = gene_name + ' Local vs Global Prediction',
         xscale = 'log', yscale = 'log',
-        xlabel = 'Trans Prediction',
-        ylabel = 'Cis Prediction',
+        xlabel = 'Local Prediction',
+        ylabel = 'Global Prediction',
     )
     
     line_extent = max(cis_prediction.max(), trans_prediction.max()) * 1.2
     
     ax[3].fill_between([0, line_extent],[0, line_extent], color = 'royalblue', alpha = 0.025)
-    ax[3].fill_between([0, line_extent],[line_extent, line_extent],[0, line_extent], color = 'red', alpha = 0.025)
+    ax[3].fill_between([0, line_extent],[line_extent, line_extent],[0, line_extent], color = 'yellow', alpha = 0.025)
 
     ax[3].legend(handles = [
+                Patch(color = 'yellow', label = 'Over-estimates', alpha = 0.5),
                 Patch(color = 'cornflowerblue', label = 'Under-estimates', alpha = 0.5),
-                Patch(color = 'indianred', label = 'Over-estimates', alpha = 0.5)
             ], **dict(
-                loc="lower center", bbox_to_anchor=(0.5, -0.5), frameon = False, ncol = 2, 
+                loc="upper center", bbox_to_anchor=(0.5, -0.25), frameon = False, ncol = 2, 
             ))
     
     ax[3].plot([0, line_extent], [0, line_extent], color = 'grey')
     ax[3].spines['right'].set_visible(False)
     ax[3].spines['top'].set_visible(False)
-    
-    #with warnings.catch_warnings():
-    #    warnings.simplefilter("ignore")
-    #    ax[3].set(xlim = (0, line_extent), ylim = (0, line_extent))
 
     plt.tight_layout()
     return ax

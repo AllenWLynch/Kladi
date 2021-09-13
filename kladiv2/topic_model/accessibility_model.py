@@ -85,6 +85,9 @@ class AccessibilityModel(BaseModel):
 
         params = old_model['params'].copy()
         params['num_topics'] = params.pop('num_modules')
+
+        if params['highly_variable'] is None:
+            params['highly_variable'] = np.ones(len(varnames)).astype(bool)
         
         fit_params = {}
         fit_params['num_exog_features'] = len(params['features'])

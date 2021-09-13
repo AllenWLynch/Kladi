@@ -23,6 +23,7 @@ import torch.nn.functional as F
 import gc
 import argparse
 from scipy.stats import nbinom
+from scipy.sparse import isspmatrix
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +253,7 @@ class TransModel(BaseModel):
             use_trans_features = True, 
             initialization_model = initialization_model
         )
-        
+
 
 class GeneCisModel:
 
@@ -495,11 +496,14 @@ class GeneCisModel:
 
 
     def get_normalized_params(self):
-        return {
+        d = {
             k[len(self.prefix) + 1:] : v.detach().cpu().numpy()
             for k, v in self.posterior_map.items()
         }
-
+        d['bn_mean'] = self.to_numpy(self.bn.running_mean)
+        d['bn_var'] = self.to_numpy(self.bn.running_var)
+        d['bn_eps'] = self.bn.eps
+        return d
 
     @staticmethod
     def _select_informative_samples(expression, n_bins = 20, n_samples = 1000, seed = 2556):
@@ -547,8 +551,9 @@ class GeneCisModel:
         promoter_weights, upstream_idx, promoter_idx, downstream_idx,
         upstream_distances, downstream_distances, read_depth, 
         softmax_denom, gene_expr, trans_features, params, bn_eps):
-        
-        hit_masks = hits_matrix.astype(bool)
+
+        assert(isspmatrix(hits_matrix))
+        assert(len(hits_matrix.shape) == 2)
         num_factors = hits_matrix.shape[0]
 
         def tile(x):
@@ -596,11 +601,16 @@ class GeneCisModel:
 
 
     def probabalistic_ISD(self, features, hits_matrix, n_samples = 1000, n_bins = 20):
-
-        informative_samples = self._select_informative_samples(features['gene_expr'], 
-            n_bins = n_bins, n_samples = n_samples)
-
+        
         N = len(features['gene_expr'])
+        #informative_samples = self._select_informative_samples(features['gene_expr'], 
+        #    n_bins = n_bins, n_samples = n_samples)
+        np.random.seed(2556)
+
+        informative_samples = np.random.choice(
+            N, size = 1500, replace = False,
+        )
+        
         for k in 'gene_expr,upstream_weights,downstream_weights,promoter_weights,softmax_denom,read_depth,trans_features'.split(','):
             features[k] = features[k][informative_samples]
 
