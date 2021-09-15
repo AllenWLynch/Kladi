@@ -506,7 +506,7 @@ class GeneCisModel:
         return d
 
     @staticmethod
-    def _select_informative_samples(expression, n_bins = 20, n_samples = 1000, seed = 2556):
+    def _select_informative_samples(expression, n_bins = 20, n_samples = 1500, seed = 2556):
         '''
         Bin based on contribution to overall expression, then take stratified sample to get most informative cells.
         '''
@@ -528,17 +528,24 @@ class GeneCisModel:
         
         differential = 0
         informative_samples = []
+        samples_taken = 0
         for _bin, _count in zip(*np.unique(bin_num, return_counts = True)):
+            
+            if _bin == n_bins - 1:
+                take_samples = n_samples - samples_taken
+            else:
+                take_samples = samples_per_bin + differential
 
-            take_samples = samples_per_bin + differential
             if _count < take_samples:
                 informative_samples.append(
                     sort_order[bin_num == _bin]
                 )
                 differential = take_samples - _count
+                samples_taken += _count
 
             else:
                 differential = 0
+                samples_taken += take_samples
                 informative_samples.append(
                     np.random.choice(sort_order[bin_num == _bin], size = take_samples, replace = False)
                 )
@@ -587,7 +594,15 @@ class GeneCisModel:
         + params['a'][1] * RP(downstream_weights, downstream_distances, params['logdistance'][1]) \
         + params['a'][2] * promoter_weights.sum(-1) # cells, factors
 
-        f_Z = (f_Z - f_Z.mean(0,keepdims = True))/np.sqrt(f_Z.var(0, keepdims = True) + bn_eps)
+        original_data = f_Z[:,0]
+        sorted_first_col = np.sort(original_data).reshape(-1)
+        quantiles = np.argsort(f_Z, axis = 0).argsort(0)
+
+        f_Z = sorted_first_col[quantiles]
+        f_Z[:,0] = original_data
+
+        #f_Z = (f_Z - f_Z[:,0].mean(0,keepdims = True))/np.sqrt(f_Z[:, 0].var(0, keepdims = True) + bn_eps)
+        f_Z = (f_Z - params['bn_mean'])/np.sqrt(params['bn_var'] + bn_eps)
 
         indep_rate = np.exp(params['gamma'] * f_Z + params['bias'])
         compositional_rate = indep_rate/softmax_denom
@@ -603,13 +618,13 @@ class GeneCisModel:
     def probabalistic_ISD(self, features, hits_matrix, n_samples = 1000, n_bins = 20):
         
         N = len(features['gene_expr'])
-        #informative_samples = self._select_informative_samples(features['gene_expr'], 
-        #    n_bins = n_bins, n_samples = n_samples)
+        informative_samples = self._select_informative_samples(features['gene_expr'], 
+            n_bins = n_bins, n_samples = n_samples)
         np.random.seed(2556)
 
-        informative_samples = np.random.choice(
+        '''informative_samples = np.random.choice(
             N, size = 1500, replace = False,
-        )
+        )'''
         
         for k in 'gene_expr,upstream_weights,downstream_weights,promoter_weights,softmax_denom,read_depth,trans_features'.split(','):
             features[k] = features[k][informative_samples]
