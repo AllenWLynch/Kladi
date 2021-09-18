@@ -1,6 +1,6 @@
 from kladi.genome_tracks.core import DynamicTrack, slugify, fill_resources
 from pygenometracks.tracks import BigWigTrack
-from kladi.core.plot_utils import map_colors
+from kladiv2.plots.base import map_colors
 import os
 import numpy as np
 from matplotlib.colors import to_hex
@@ -51,7 +51,7 @@ class DynamicFragmentCov(DynamicTrack):
     @fill_resources('adata','fragment_file','genome_file')
     def __init__(self,*,track_id, adata = None, fragment_file = None, genome_file = None, groupby = None, palette = 'Set2', 
             color = None, hue_order = None, barcode_col = None, min_cells = 50,
-            hue = None, hue_function = np.nanmean, layer = None,
+            hue = None, hue_function = np.nanmean, layer = None, vmin = None, vmax = None,
             norm_constant = 1e4, labels = None, overlay_previous = 'no', **properties):
         
         if barcode_col is None:
@@ -75,7 +75,8 @@ class DynamicFragmentCov(DynamicTrack):
 
         if hue is None:
             if color is None:
-                track_colors = map_colors(None, groups, palette, add_legend = False, hue_order = hue_order)
+                track_colors = map_colors(None, groups, palette, add_legend = False, hue_order = hue_order,
+                    vmin = vmin, vmax = vmax)
             else:
                 track_colors = [color]*num_groups
         else:
@@ -97,7 +98,7 @@ class DynamicFragmentCov(DynamicTrack):
                 for group, count in zip(groups, counts)
             ]
 
-            track_colors =  map_colors(None, hue_vals, palette, add_legend = False)
+            track_colors =  map_colors(None, hue_vals, palette, add_legend = False, vmin = vmin, vmax = vmax)
             
 
         if 'title' in properties:

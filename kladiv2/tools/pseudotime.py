@@ -79,10 +79,10 @@ def get_dendogram_levels(G):
 )
 def normalize_diffmap(*,diffmap, eig_vals):
 
-    num_comps = np.maximum(np.argmax(eig_vals[:-1] - eig_vals[1:]), 3)
+    num_comps = np.maximum(np.argmax(eig_vals[:-1] - eig_vals[1:]), 4)
     diffmap = diffmap[:, 1:num_comps]
-    diffmap/=np.linalg.norm(diffmap, axis = 0, keepdims = True)
     
+    diffmap/=np.linalg.norm(diffmap, axis = 0, keepdims = True)
     eig_vals = eig_vals[1:num_comps]
     diffmap *= (eig_vals / (1 - eig_vals))[np.newaxis, :]
 

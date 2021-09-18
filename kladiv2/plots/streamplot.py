@@ -97,7 +97,7 @@ def _plot_stream_segment(is_leaf = True, centerline = 0, window_size = 101,cente
 
 def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_root = True, size = 3, show_points = True,
         palette = 'Set3', linecolor = 'black', linewidth = 0.5, feature_labels = None, hue_order = None, show_legend = True, legend_cols = 5,
-        color = 'black', max_bar_height = 0.6,*, ax, features, pseudotime, **kwargs,):
+        color = 'black', max_bar_height = 0.6, alpha = 1.,*, ax, features, pseudotime, **kwargs,):
     
     if (features.shape) == 1:
         features = features[:, np.newaxis]
@@ -138,7 +138,7 @@ def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_
             smoothed_features + centerline,
             color = _color, 
             linewidth = np.sqrt(size),
-            alpha = 0.5 if show_points else 1,
+            alpha = alpha,
         )
         
         ax.vlines(min_time, ymin = centerline, ymax = centerline + max_bar_height, color = linecolor, linewidth = linewidth)
@@ -285,7 +285,7 @@ def _build_tree(cell_colors = None, size = None, shape = None,*, max_bar_height 
             min_times[end_clus] = pseudotime.min()
 
     plot_bottom = min_centerline - max_bar_height/2 - 0.3
-    ax.set(ylim = (plot_bottom, max_centerline + max_bar_height/2))
+    ax.set(ylim = (plot_bottom, max_centerline + max_bar_height/2 + 0.15))
 
     return plot_bottom
 
@@ -323,7 +323,7 @@ def plot_stream(style = 'stream', split = False, log_pseudotime = True, scale_fe
     palette = None, color = 'black', linecolor = 'black', linewidth = None, hue_order = None, pseudotime_triangle = True,
     scaffold_linecolor = 'lightgrey', scaffold_linewidth = 1, min_pseudotime = 0.05,
     figsize = (10,5), ax = None, plots_per_row = 4, height = 4, aspect = 1.3, tree_structure = True,
-    center_baseline = True, window_size = 101, clip = 10,
+    center_baseline = True, window_size = 101, clip = 10, alpha = 1.,
     feature_labels = None, group_names = None, tree_graph = None,*, features, pseudotime, group):
 
     assert(isinstance(max_bar_height, float) and max_bar_height > 0 and max_bar_height <= 1)
@@ -381,7 +381,7 @@ def plot_stream(style = 'stream', split = False, log_pseudotime = True, scale_fe
 
     segment_kwargs = dict(
         window_size = window_size, center_baseline = center_baseline, hide_feature_threshold = hide_feature_threshold, legend_cols = legend_cols,
-        palette = palette, linecolor = linecolor, linewidth = linewidth, hue_order = hue_order, show_legend = show_legend,
+        palette = palette, linecolor = linecolor, linewidth = linewidth, hue_order = hue_order, show_legend = show_legend, alpha = alpha,
         color = color, size = size, max_bar_height = max_bar_height, max_swarm_density = max_swarm_density, show_points = show_points,
     )
     segment_kwargs = {k : v for k, v in segment_kwargs.items() if not v is None} #eliminate None values to allow segment functions to fill default values
@@ -420,7 +420,7 @@ def plot_stream(style = 'stream', split = False, log_pseudotime = True, scale_fe
             segment_fn(features = features, pseudotime = pseudotime, is_leaf = False, ax = ax, max_bar_height = max_bar_height,
                 centerline = 0, lineage_name = '', segment_connection = None, is_root = True, cell_colors = cell_colors)
 
-            ax.set(ylim = (plot_bottom, max_bar_height/2))
+            ax.set(ylim = (plot_bottom, max_bar_height/2 + 0.15))
         
         if pseudotime_triangle:
             _plot_pseudotime_scale(ax = ax, pseudotime = pseudotime, plot_bottom = plot_bottom)

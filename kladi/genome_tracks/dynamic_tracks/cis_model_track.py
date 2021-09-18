@@ -28,12 +28,17 @@ class CisModelTrack(DynamicTrack, BigWigTrack):
 
     RULE_NAME = 'cis_model'
 
-    @fill_resources('genome_file')
-    def __init__(self,*,track_id, cis_model, genome_file = None, bin_size = 100,
-        extend = 5, **properties):
+    @fill_resources('genome_file', 'gene_annotation')
+    def __init__(self,*,track_id, cis_model, genome_file = None, gene_annotation = None, bin_size = 100,
+        extend = 5, gene_symbol_col = 'geneSymbol', **properties):
         
         self.model_params = cis_model.get_normalized_params()
-        self.chrom, self.start, self.end, _, self.strand = cis_model.origin
+        self.chrom, self.start, self.end, self.strand = \
+            gene_annotation.set_index('geneSymbol').loc[cis_model.gene][['chrom','txStart','txEnd','strand']].values
+
+        if self.strand == '-':
+            self.start, self.end = self.end, self.start
+
         self.start = int(self.start)
         self.end = int(self.end)
         self.bin_size = bin_size
@@ -90,23 +95,23 @@ class DynamicCisModels(DynamicTrack):
 
         self.children = []
         models_added = 0
-        for cis_model in cis_models.gene_models:
-            if any([
+        for cis_model in cis_models.models:
+            '''if any([
                 regions_overlap(region, cis_model.get_bounds(extend)) for region in regions
-            ]):
-                self.children.append(
-                    CisModelTrack(
-                        track_id = '{}_{}'.format(track_id, cis_model.gene),
-                        title = 'Cis Models' if models_added > 0 else '',
-                        cis_model = cis_model,
-                        genome_file = genome_file,
-                        bin_size = bin_size,
-                        extend = extend,
-                        overlay_previous = 'yes' if models_added > 0 else 'no',
-                        **properties,
-                    )
+            ]):'''
+            self.children.append(
+                CisModelTrack(
+                    track_id = '{}_{}'.format(track_id, cis_model.gene),
+                    title = 'Cis Models' if models_added > 0 else '',
+                    cis_model = cis_model,
+                    genome_file = genome_file,
+                    bin_size = bin_size,
+                    extend = extend,
+                    overlay_previous = 'yes' if models_added > 0 else 'no',
+                    **properties,
                 )
-                models_added+=1
+            )
+            models_added+=1
 
     def freeze(self):
         for child in self.children:

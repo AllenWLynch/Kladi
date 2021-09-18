@@ -1,102 +1,31 @@
-ahrarnt_binding_22: &id001 {}
-arid3a_binding_0: *id001
+annotation: {}
 bin: /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/bin
-cis_model:
+cis_models_notch1:
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
-coverage_1:
-  fragment_file: data/mouse_prostate/atac_fragments.tsv
-  genome_file: /Users/alynch/genomes/mm10/mm10.genome
-  norm_constant: 10000.0
-coverage_2:
-  fragment_file: data/mouse_prostate/atac_fragments.tsv
+coverage_cortex:
+  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-coverage_3:
-  fragment_file: data/mouse_prostate/atac_fragments.tsv
+coverage_irs:
+  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-coverage_4:
-  fragment_file: data/mouse_prostate/atac_fragments.tsv
+coverage_medulla:
+  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-ctcf_binding_2: *id001
-ctcf_binding_21: *id001
-esr2_binding_23: *id001
-foxj2_binding_10: *id001
-foxj3_binding_4: *id001
-foxo1_binding_18: *id001
-foxo3_binding_6: *id001
-foxo4_binding_5: *id001
-foxp1_binding_11: *id001
-foxp2_binding_7: *id001
-genes: *id001
-hoxb13_binding_1: *id001
-klf11_binding_13: *id001
-klf2_binding_20: *id001
-maz_binding_16: *id001
-mef2a_binding_3: *id001
-mef2c_binding_8: *id001
-nfe2l1_binding_9: *id001
-nfe2l2_binding_17: *id001
+coverage_ors:
+  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+  norm_constant: 10000.0
 sources:
-  datamouse_prostateatac_fragmentstsv: data/mouse_prostate/atac_fragments.tsv
-  datamouse_prostategenesbed12: data/mouse_prostate/genes.bed12
-  datamouse_prostatemisc_tracksdgat1_ahrarnt_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_AHR::ARNT_binding.bed
-  datamouse_prostatemisc_tracksdgat1_arid3a_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_ARID3A_binding.bed
-  datamouse_prostatemisc_tracksdgat1_ctcf_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_CTCF_binding.bed
-  datamouse_prostatemisc_tracksdgat1_esr2_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_ESR2_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxj2_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXJ2_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxj3_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXJ3_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxo1_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXO1_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxo3_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXO3_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxo4_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXO4_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxp1_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXP1_binding.bed
-  datamouse_prostatemisc_tracksdgat1_foxp2_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_FOXP2_binding.bed
-  datamouse_prostatemisc_tracksdgat1_hoxb13_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_HOXB13_binding.bed
-  datamouse_prostatemisc_tracksdgat1_klf11_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_KLF11_binding.bed
-  datamouse_prostatemisc_tracksdgat1_klf2_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_KLF2_binding.bed
-  datamouse_prostatemisc_tracksdgat1_maz_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_MAZ_binding.bed
-  datamouse_prostatemisc_tracksdgat1_mef2a_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_MEF2A_binding.bed
-  datamouse_prostatemisc_tracksdgat1_mef2c_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_MEF2C_binding.bed
-  datamouse_prostatemisc_tracksdgat1_nfe2l1_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_NFE2L1_binding.bed
-  datamouse_prostatemisc_tracksdgat1_nfe2l2_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_NFE2L2_binding.bed
-  datamouse_prostatemisc_tracksdgat1_sp1_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_SP1_binding.bed
-  datamouse_prostatemisc_tracksdgat1_sp3_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_SP3_binding.bed
-  datamouse_prostatemisc_tracksdgat1_sp8_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_SP8_binding.bed
-  datamouse_prostatemisc_tracksdgat1_wt1_bindingbed: data/mouse_prostate/misc_tracks/DGAT1_WT1_binding.bed
+  datasetsshare_seqnotebookstracks_datafiltered_genesbed: ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
+  datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   none: none
-sp1_binding_19: *id001
-sp3_binding_15: *id001
-sp8_binding_14: *id001
 targets:
-- data/mouse_prostate/genes.bed12
-- data/mouse_prostate/workdir/dgat1/coverage_1-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
-- data/mouse_prostate/workdir/dgat1/coverage_2-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
-- data/mouse_prostate/workdir/dgat1/coverage_3-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
-- data/mouse_prostate/workdir/dgat1/coverage_4-fragment_coverage-datamouse_prostateatac_fragmentstsv-pileup.bigwig
-- data/mouse_prostate/workdir/dgat1/cis_model-cis_model-none-cis_model.bigwig
-- data/mouse_prostate/misc_tracks/DGAT1_ARID3A_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_HOXB13_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_CTCF_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_MEF2A_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXJ3_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXO4_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXO3_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXP2_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_MEF2C_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_NFE2L1_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXJ2_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXP1_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_WT1_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_KLF11_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_SP8_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_SP3_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_MAZ_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_NFE2L2_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_FOXO1_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_SP1_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_KLF2_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_CTCF_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_AHR::ARNT_binding.bed
-- data/mouse_prostate/misc_tracks/DGAT1_ESR2_binding.bed
-wt1_binding_12: *id001
+- ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
+- data/shareseq/trackdir/notch1/cis_models_notch1-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/notch1/coverage_cortex-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/notch1/coverage_irs-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/notch1/coverage_medulla-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/notch1/coverage_ors-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
