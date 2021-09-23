@@ -54,10 +54,10 @@ def _plot_chromatin_differential(
     line_extent = max(cis_prediction.max(), trans_prediction.max()) * 1.2
     
     ax[3].fill_between([0, line_extent],[0, line_extent], color = 'royalblue', alpha = 0.025)
-    ax[3].fill_between([0, line_extent],[line_extent, line_extent],[0, line_extent], color = 'yellow', alpha = 0.025)
+    ax[3].fill_between([0, line_extent],[line_extent, line_extent],[0, line_extent], color = 'grey', alpha = 0.025)
 
     ax[3].legend(handles = [
-                Patch(color = 'yellow', label = 'Over-estimates', alpha = 0.5),
+                Patch(color = 'lightgrey', label = 'Over-estimates', alpha = 0.5),
                 Patch(color = 'cornflowerblue', label = 'Under-estimates', alpha = 0.5),
             ], **dict(
                 loc="upper center", bbox_to_anchor=(0.5, -0.25), frameon = False, ncol = 2, 

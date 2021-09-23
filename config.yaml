@@ -1,20 +1,16 @@
 annotation: {}
 bin: /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/bin
-cis_models_notch1:
+cis_models_lef1:
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
-coverage_cortex:
+coverage_a_ors:
   fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-coverage_irs:
+coverage_b_branch:
   fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-coverage_medulla:
-  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
-  genome_file: /Users/alynch/genomes/mm10/mm10.genome
-  norm_constant: 10000.0
-coverage_ors:
+coverage_d_cortex:
   fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
@@ -24,8 +20,7 @@ sources:
   none: none
 targets:
 - ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
-- data/shareseq/trackdir/notch1/cis_models_notch1-cis_model-none-cis_model.bigwig
-- data/shareseq/trackdir/notch1/coverage_cortex-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/notch1/coverage_irs-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/notch1/coverage_medulla-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/notch1/coverage_ors-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/lef1/cis_models_lef1-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/lef1/coverage_a_ors-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/lef1/coverage_b_branch-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/lef1/coverage_d_cortex-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig

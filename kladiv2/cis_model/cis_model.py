@@ -302,7 +302,7 @@ class GeneCisModel:
                 a = pyro.sample("a", dist.HalfNormal(1.))
 
             with pyro.plate("upstream-downstream", 2):
-                d = pyro.sample('logdistance', dist.LogNormal(np.log(10), 1.))
+                d = pyro.sample('logdistance', dist.LogNormal(np.log(15), 1))
 
             if self.use_trans_features and hasattr(self, 'seed_params'):
                 theta = self.seed_params[self.prefix + '/theta']
