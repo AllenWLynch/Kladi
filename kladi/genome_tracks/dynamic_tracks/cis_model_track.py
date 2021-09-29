@@ -1,5 +1,6 @@
-from kladi.genome_tracks.core import DynamicTrack, slugify, fill_resources
+from kladi.genome_tracks.core import DynamicTrack, TrackController, slugify, fill_resources, fill_default_vizargs
 from pygenometracks.tracks import BigWigTrack
+from kladi.genome_tracks.static_tracks import StaticBigWigTrack
 from kladi.core.plot_utils import map_colors
 import os
 import numpy as np
@@ -28,19 +29,14 @@ class CisModelTrack(DynamicTrack, BigWigTrack):
 
     RULE_NAME = 'cis_model'
 
-    @fill_resources('genome_file', 'gene_annotation')
-    def __init__(self,*,track_id, cis_model, genome_file = None, gene_annotation = None, bin_size = 100,
+    @fill_resources('genome_file')
+    def __init__(self,*,track_id, chrom, start, strand, cis_model, genome_file = None, bin_size = 100,
         extend = 5, gene_symbol_col = 'geneSymbol', **properties):
         
         self.model_params = cis_model.get_normalized_params()
-        self.chrom, self.start, self.end, self.strand = \
-            gene_annotation.set_index('geneSymbol').loc[cis_model.gene][['chrom','txStart','txEnd','strand']].values
 
-        if self.strand == '-':
-            self.start, self.end = self.end, self.start
+        self.chrom, self.start, self.strand = str(chrom), int(start), str(strand)
 
-        self.start = int(self.start)
-        self.end = int(self.end)
         self.bin_size = bin_size
         self.extend = extend
 
@@ -85,26 +81,35 @@ class CisModelTrack(DynamicTrack, BigWigTrack):
             self.write_function_side(f, -1 * mod, down_decay)                   
 
 
-class DynamicCisModels(DynamicTrack):
+class DynamicCisModels(TrackController):
 
-    @fill_resources('genome_file')
-    def __init__(self, *, track_id, cis_models, genome_file = None, bin_size = 100, extend = 5,
-        overlay_previous = 'yes', **properties):
+    @fill_resources('genome_file', 'tss_data')
+    @fill_default_vizargs(StaticBigWigTrack)
+    def __init__(self, *, track_id, cis_models, genome_file = None, tss_data = None, bin_size = 100, extend = 5,
+        overlay_previous = 'yes', symbol_col = 'geneSymbol', chrom_col = 'chrom', start_col = 'txStart', end_col = 'txEnd', 
+        strand_col = 'strand', **properties):
 
         regions = self.get_context().regions
 
         self.children = []
         models_added = 0
         for cis_model in cis_models.models:
-            '''if any([
-                regions_overlap(region, cis_model.get_bounds(extend)) for region in regions
-            ]):'''
+            
+            _chrom, _start, _end, _strand = \
+                tss_data.set_index(symbol_col).loc[cis_model.gene][[chrom_col, start_col, end_col, strand_col]].values
+
+            if _strand == '-':
+                _start = _end
+
             self.children.append(
                 CisModelTrack(
                     track_id = '{}_{}'.format(track_id, cis_model.gene),
-                    title = 'Cis Models' if models_added > 0 else '',
+                    title = 'Cis Models' if models_added == 0 else '',
                     cis_model = cis_model,
                     genome_file = genome_file,
+                    chrom = _chrom,
+                    start = _start,
+                    strand = _strand,
                     bin_size = bin_size,
                     extend = extend,
                     overlay_previous = 'yes' if models_added > 0 else 'no',
@@ -112,9 +117,3 @@ class DynamicCisModels(DynamicTrack):
                 )
             )
             models_added+=1
-
-    def freeze(self):
-        for child in self.children:
-            child.freeze()
-
-        return self

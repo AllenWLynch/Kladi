@@ -1,5 +1,6 @@
-from kladi.genome_tracks.core import DynamicTrack, slugify, fill_resources
+from kladi.genome_tracks.core import DynamicTrack, TrackController, slugify, fill_resources, fill_default_vizargs
 from pygenometracks.tracks import BigWigTrack
+from kladi.genome_tracks.static_tracks import StaticBigWigTrack
 from kladiv2.plots.base import map_colors
 import os
 import numpy as np
@@ -46,9 +47,10 @@ class FragmentCovTrack(DynamicTrack, BigWigTrack):
         
 
 
-class DynamicFragmentCov(DynamicTrack):
+class DynamicFragmentCov(TrackController):
 
     @fill_resources('adata','fragment_file','genome_file')
+    @fill_default_vizargs(StaticBigWigTrack)
     def __init__(self,*,track_id, adata = None, fragment_file = None, genome_file = None, groupby = None, palette = 'Set2', 
             color = None, hue_order = None, barcode_col = None, min_cells = 50,
             hue = None, hue_function = np.nanmean, layer = None, vmin = None, vmax = None,
@@ -120,15 +122,3 @@ class DynamicFragmentCov(DynamicTrack):
                     overlay_previous = overlay_previous if i > 0 else None,
                     **properties,
                 ))
-
-    def freeze(self):
-        for child in self.children:
-            child.freeze()
-
-        return self
-        
-
-
-        
-        
-

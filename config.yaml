@@ -1,26 +1,52 @@
-annotation: {}
-bin: /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/bin
-cis_models_lef1:
-  genome_file: /Users/alynch/genomes/mm10/mm10.genome
-coverage_a_ors:
-  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
-  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+bin: /home/allen/projects/liulab/multiomics/kladi/Kladi/kladi/genome_tracks/bin
+cismodel_al5910432:
+  genome_file: /home/allen/genomes/hg38/hg38.genome
+cismodel_cd74:
+  genome_file: /home/allen/genomes/hg38/hg38.genome
+cismodel_dzank1:
+  genome_file: /home/allen/genomes/hg38/hg38.genome
+cismodel_il4r:
+  genome_file: /home/allen/genomes/hg38/hg38.genome
+cismodel_pax5:
+  genome_file: /home/allen/genomes/hg38/hg38.genome
+coverage_b_cell:
+  fragment_file: data/bcell_lymphoma/trackdata/lymph_node_lymphoma_14k_atac_fragments.tsv.gz
+  genome_file: /home/allen/genomes/hg38/hg38.genome
   norm_constant: 10000.0
-coverage_b_branch:
-  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
-  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+coverage_lymphoma:
+  fragment_file: data/bcell_lymphoma/trackdata/lymph_node_lymphoma_14k_atac_fragments.tsv.gz
+  genome_file: /home/allen/genomes/hg38/hg38.genome
   norm_constant: 10000.0
-coverage_d_cortex:
-  fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
-  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+coverage_macrophage:
+  fragment_file: data/bcell_lymphoma/trackdata/lymph_node_lymphoma_14k_atac_fragments.tsv.gz
+  genome_file: /home/allen/genomes/hg38/hg38.genome
   norm_constant: 10000.0
+coverage_t_cell:
+  fragment_file: data/bcell_lymphoma/trackdata/lymph_node_lymphoma_14k_atac_fragments.tsv.gz
+  genome_file: /home/allen/genomes/hg38/hg38.genome
+  norm_constant: 10000.0
+factorhits_46138: {}
+factorhits_51245: {}
+factorhits_59437: {}
+genes: &id001 {}
+scalebar: *id001
 sources:
-  datasetsshare_seqnotebookstracks_datafiltered_genesbed: ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
-  datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
+  databcell_lymphoma: data/bcell_lymphoma/
+  databcell_lymphomatrackdatalymph_node_lymphoma_14k_atac_fragmentstsvgz: data/bcell_lymphoma/trackdata/lymph_node_lymphoma_14k_atac_fragments.tsv.gz
+  homeallengenomeshg38hg38_annotation_canonicalbed: /home/allen/genomes/hg38/hg38_annotation_canonical.bed
   none: none
 targets:
-- ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
-- data/shareseq/trackdir/lef1/cis_models_lef1-cis_model-none-cis_model.bigwig
-- data/shareseq/trackdir/lef1/coverage_a_ors-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/lef1/coverage_b_branch-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/lef1/coverage_d_cortex-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/bcell_lymphoma/
+- /home/allen/genomes/hg38/hg38_annotation_canonical.bed
+- data/bcell_lymphoma/trackdata/pax5/cismodel_pax5-cis_model-none-cis_model.bigwig
+- data/bcell_lymphoma/trackdata/pax5/cismodel_il4r-cis_model-none-cis_model.bigwig
+- data/bcell_lymphoma/trackdata/pax5/cismodel_cd74-cis_model-none-cis_model.bigwig
+- data/bcell_lymphoma/trackdata/pax5/cismodel_al5910432-cis_model-none-cis_model.bigwig
+- data/bcell_lymphoma/trackdata/pax5/cismodel_dzank1-cis_model-none-cis_model.bigwig
+- data/bcell_lymphoma/trackdata/pax5/coverage_b_cell-fragment_coverage-databcell_lymphomatrackdatalymph_node_lymphoma_14k_atac_fragmentstsvgz-pileup.bigwig
+- data/bcell_lymphoma/trackdata/pax5/coverage_lymphoma-fragment_coverage-databcell_lymphomatrackdatalymph_node_lymphoma_14k_atac_fragmentstsvgz-pileup.bigwig
+- data/bcell_lymphoma/trackdata/pax5/coverage_macrophage-fragment_coverage-databcell_lymphomatrackdatalymph_node_lymphoma_14k_atac_fragmentstsvgz-pileup.bigwig
+- data/bcell_lymphoma/trackdata/pax5/coverage_t_cell-fragment_coverage-databcell_lymphomatrackdatalymph_node_lymphoma_14k_atac_fragmentstsvgz-pileup.bigwig
+- data/bcell_lymphoma/trackdata/pax5/factorhits_46138-bed-none-bed.bed
+- data/bcell_lymphoma/trackdata/pax5/factorhits_51245-bed-none-bed.bed
+- data/bcell_lymphoma/trackdata/pax5/factorhits_59437-bed-none-bed.bed
