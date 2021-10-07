@@ -1,3 +1,4 @@
+from pyro.primitives import param
 from yaml import dump
 from pygenometracks.tracks import GenomeTrack
 import threading
@@ -12,6 +13,7 @@ import numpy as np
 import logging
 from scipy.sparse import isspmatrix
 from functools import wraps
+import inspect
 
 class PipelineException(Exception):
     pass
@@ -72,8 +74,9 @@ class Context(object):
 
 class GenomeView(Context):
 
-    def __init__(self,*, workdir, regions, titles = None, 
-        cores = 1, skip_snakemake = False, **resources):
+    def __init__(self,*, workdir, regions, genes = [], buffer_genes = 1e5, titles = None, cores = 1, skip_snakemake = False, 
+        symbol_col = 'geneSymbol', chrom_col = 'chrom', start_col = 'txStart', end_col = 'txEnd', 
+        **resources):
 
         self.workdir = workdir
         self.cores = 1
@@ -88,7 +91,14 @@ class GenomeView(Context):
         if isinstance(regions, (list, np.ndarray)):
             self.regions = [self.parse_region(region) for region in regions]
         else:
-            self.regions = [self.parse_region(str(region))]
+            self.regions = [self.parse_region(str(regions))]
+
+        if isinstance(genes, (list, np.ndarray)):
+            
+            tss_data = self.get_resource('tss_data')
+
+            tss_data
+
 
         if isinstance(titles, str):
             self.titles = [titles]
@@ -121,12 +131,14 @@ class GenomeView(Context):
             os.path.dirname(__file__), 'SnakeFile'
         )
 
-    def parse_region(self, region):
-        if re.match('chr\d+:\d+-\d+', region):
+    @staticmethod
+    def parse_region(region):
+        
+        if re.match('\S+:\d+-\d+', region):
             chrom, start, end = re.split('[:-]', region)
             return (chrom, start, end)
         else:
-            raise NotImplementedError()       
+            raise NotImplementedError('Cannot parse region: ' + str(region))       
 
 
     def __exit__(self, typ, value, traceback):
@@ -291,27 +303,7 @@ class GenomeView(Context):
         return self
 
     def __len__(self):
-        return self.len(tracks)
-
-def fill_resources(*resources):
-
-    def decorator_fill(func):
-
-        #func.__signature__ = inspect.Signature(list(getter_signature.values()))
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            
-            available_resources = self.get_context().resources
-            for resource in resources:
-                if not resource in kwargs:
-                    kwargs[resource] = self.get_context().get_resource(resource)
-            
-            return func(self, *args, **kwargs)
-
-        return wrapper
-
-    return decorator_fill
-
+        return self.len(self.tracks)
 
 class BaseTrack(GenomeTrack):
 
@@ -333,6 +325,7 @@ class BaseTrack(GenomeTrack):
         self.source_id = slugify(source)
         self.snakemake_properties = snakemake_properties
         self.recalculate = True
+        self.children = []
 
         self.parent = self.get_context()
         self.parent.add_track(self)
@@ -401,3 +394,58 @@ class DynamicTrack(BaseTrack):
 
     def transform_source(self):
         pass
+
+class TrackController(DynamicTrack):
+
+    def freeze(self):
+        for child in self.children:
+            child.freeze()
+
+        return self
+
+
+def fill_resources(*resources):
+
+    def decorator_fill(func):
+
+        #func.__signature__ = inspect.Signature(list(getter_signature.values()))
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            
+            available_resources = self.get_context().resources
+            for resource in resources:
+                if not resource in kwargs:
+                    kwargs[resource] = self.get_context().get_resource(resource)
+            
+            return func(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator_fill
+
+
+def fill_default_vizargs(parent_track):
+
+    def _fill(func):
+
+        signature = inspect.signature(func).parameters.copy()
+        
+        props = signature.pop('properties')
+
+        new_kwargs = {k : inspect.Parameter(k, kind = inspect.Parameter.KEYWORD_ONLY, default=v) 
+            for k, v in parent_track.DEFAULTS_PROPERTIES.items()}
+
+        signature.update(**new_kwargs)
+        signature['properties'] = props
+
+        func.__signature__ = inspect.Signature(list(signature.values()))
+
+        @wraps(func)
+        def _run(*args, **kwargs):
+
+            return func(*args, **kwargs)
+
+        return _run
+
+
+    return _fill

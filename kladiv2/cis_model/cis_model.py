@@ -617,10 +617,11 @@ class GeneCisModel:
 
     def probabalistic_ISD(self, features, hits_matrix, n_samples = 1000, n_bins = 20):
         
+        np.random.seed(2556)
         N = len(features['gene_expr'])
         informative_samples = self._select_informative_samples(features['gene_expr'], 
             n_bins = n_bins, n_samples = n_samples)
-        np.random.seed(2556)
+        
 
         '''informative_samples = np.random.choice(
             N, size = 1500, replace = False,
