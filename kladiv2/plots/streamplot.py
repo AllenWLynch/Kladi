@@ -143,10 +143,12 @@ def _plot_scatter_segment(is_leaf = True, centerline = 0, window_size = 101, is_
         
         ax.vlines(min_time, ymin = centerline, ymax = centerline + max_bar_height, color = linecolor, linewidth = linewidth)
         ax.vlines(max_time, ymin = centerline, ymax = centerline + max_bar_height, color = linecolor, linewidth = linewidth)
+        #ax.hlines(centerline, xmin = min_time, xmax = max_time, color = linecolor, linewidth = linewidth)
 
         ax.spines['right'].set_visible(False)
         ax.spines['top'].set_visible(False)
-        ax.set(xticks = [], yticks = [])
+        #ax.spines['left'].set_visible(False)
+        #ax.set(xticks = [], yticks = [])
         #ax.hlines(centerline, xmin = min_time, xmax = max_time, color = linecolor, linewidth = linewidth)
     
     if num_features == 1:
@@ -323,7 +325,7 @@ def plot_stream(style = 'stream', split = False, log_pseudotime = True, scale_fe
     palette = None, color = 'black', linecolor = 'black', linewidth = None, hue_order = None, pseudotime_triangle = True,
     scaffold_linecolor = 'lightgrey', scaffold_linewidth = 1, min_pseudotime = 0.05,
     figsize = (10,5), ax = None, plots_per_row = 4, height = 4, aspect = 1.3, tree_structure = True,
-    center_baseline = True, window_size = 101, clip = 10, alpha = 1.,
+    center_baseline = True, window_size = 101, clip = 10, alpha = 1., vertical = False,
     feature_labels = None, group_names = None, tree_graph = None,*, features, pseudotime, group):
 
     assert(isinstance(max_bar_height, float) and max_bar_height > 0 and max_bar_height <= 1)
@@ -443,7 +445,8 @@ def plot_stream(style = 'stream', split = False, log_pseudotime = True, scale_fe
             make_plot(ax, features[:, np.newaxis])
             ax.set_title(str(label), fontdict= dict(fontsize = 'x-large'))
             
-        fig,ax = map_plot(map_stream, list(zip(features.T, feature_labels)), plots_per_row= plots_per_row, height= height, aspect= aspect)
+        fig,ax = map_plot(map_stream, list(zip(features.T, feature_labels)), plots_per_row= plots_per_row, height= height, aspect= aspect,
+                        vertical = vertical)
         if not title is None:
             fig.suptitle(title, fontsize = 16)
         

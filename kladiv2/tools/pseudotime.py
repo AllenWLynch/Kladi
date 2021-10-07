@@ -278,7 +278,7 @@ def get_transport_map(ka = 5, n_jobs = -1,*, start_cell, distance_matrix, diffma
     adata_extractor = adi.fetch_transport_map, adata_adder = adi.return_output, 
     del_kwargs = ['transport_map']
 )
-def find_terminal_cells(iterations = 1, max_termini = 10, *, transport_map):
+def find_terminal_cells(iterations = 1, max_termini = 10, threshold = 1e-3, *, transport_map):
 
     assert(transport_map.shape[0] == transport_map.shape[1])
     assert(len(transport_map.shape) == 2)
@@ -287,7 +287,7 @@ def find_terminal_cells(iterations = 1, max_termini = 10, *, transport_map):
 
         vals, vectors = eigs(transport_map.T, k = max_termini)
 
-        stationary_vecs = np.isclose(np.real(vals), 1., 1e-3)
+        stationary_vecs = np.isclose(np.real(vals), 1., threshold)
 
         return list(np.real(vectors)[:, stationary_vecs].argmax(0))
 

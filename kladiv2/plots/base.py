@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from math import ceil
 
 
-def map_plot(func, data, plots_per_row = 3, height =4, aspect = 1.5):
+def map_plot(func, data, plots_per_row = 3, height =4, aspect = 1.5, vertical = False):
 
     num_plots = len(data)
 
@@ -20,6 +20,9 @@ def map_plot(func, data, plots_per_row = 3, height =4, aspect = 1.5):
         ax = np.array([[ax]])
     elif num_rows==1:
         ax = ax[np.newaxis, :]
+
+    if vertical:
+        ax = ax.T
 
     for ax_i, d in zip(ax.ravel(), data):
         
@@ -112,7 +115,10 @@ def plot_umap(X, hue, palette = 'viridis', projection = '2d', ax = None, figsize
     plot_order = hue.argsort()
 
     if ax is None:
-            fig, ax = plt.subplots(1,1,figsize=figsize)
+        fig, ax = plt.subplots(1,1,figsize=figsize)
+
+    if isinstance(size, (list, np.ndarray)):
+        size = size[plot_order]
 
     colors = map_colors(ax, hue[plot_order], palette, add_legend=add_legend, hue_order = hue_order, vmin = vmin, vmax = vmax,
             cbar_kwargs = dict(orientation = 'vertical', pad = 0.01, shrink = 0.5, aspect = 15, anchor = (1.05, 0.5)),

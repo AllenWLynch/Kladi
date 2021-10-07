@@ -1,26 +1,41 @@
-annotation: {}
+annotation: &id001 {}
 bin: /Users/alynch/projects/multiomics/kladi/kladi/genome_tracks/bin
+cis_models_bambi:
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+cis_models_hivep3:
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
 cis_models_lef1:
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+cis_models_notch1:
+  genome_file: /Users/alynch/genomes/mm10/mm10.genome
+cis_models_wnt3:
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
 coverage_a_ors:
   fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-coverage_b_branch:
+coverage_b_matrix:
   fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
-coverage_d_cortex:
+coverage_e_cortex:
   fragment_file: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
   genome_file: /Users/alynch/genomes/mm10/mm10.genome
   norm_constant: 10000.0
+scalebar: *id001
 sources:
   datasetsshare_seqnotebookstracks_datafiltered_genesbed: ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
   datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed: ../datasets/share-seq/notebooks/tracks_data/GSM4156597_skin.late.anagen.atac.fragments.sorted.bed
+  datashareseq: data/shareseq/
   none: none
 targets:
+- data/shareseq/
 - ../datasets/share-seq/notebooks/tracks_data/filtered_genes.bed
-- data/shareseq/trackdir/lef1/cis_models_lef1-cis_model-none-cis_model.bigwig
-- data/shareseq/trackdir/lef1/coverage_a_ors-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/lef1/coverage_b_branch-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
-- data/shareseq/trackdir/lef1/coverage_d_cortex-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/wnt3/cis_models_lef1-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/wnt3/cis_models_notch1-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/wnt3/cis_models_hivep3-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/wnt3/cis_models_bambi-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/wnt3/cis_models_wnt3-cis_model-none-cis_model.bigwig
+- data/shareseq/trackdir/wnt3/coverage_a_ors-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/wnt3/coverage_b_matrix-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
+- data/shareseq/trackdir/wnt3/coverage_e_cortex-fragment_coverage-datasetsshare_seqnotebookstracks_datagsm4156597_skinlateanagenatacfragmentssortedbed-pileup.bigwig
