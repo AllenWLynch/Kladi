@@ -20,9 +20,17 @@ conda install -c conda-forge mira_multiome
 ## Methodology
 
 <p align="center">
-  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_schematic.pdf" width="500" />
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_schematic.png"/>
 </p>
 
+### MIRA Topic Model
+MIRA harnesses a variational autoencoder approach to model both transcription and chromatin accessibility topics defining each cell’s identity while accounting for their distinct statistical properties and employing a sparsity constraint to ensure topics are coherent and interpretable. MIRA’s hyperparameter tuning scheme learns the appropriate number of topics needed to comprehensively yet non-redundantly describe each dataset. MIRA next combines the expression and accessibility topics into a joint representation used to calculate a k-nearest neighbors (KNN) graph. This output can then be leveraged for visualization and clustering, construction of high fidelity lineage trajectories, and rigorous topic analysis to determine regulators driving key fate decisions at lineage branch points. 
+
+### MIRA RP Model
+MIRA’s regulatory potential (RP) model integrates transcriptional and chromatin accessibility data at each gene locus to determine how regulatory elements surrounding each gene influence its expression. Regulatory influence of enhancers is modeled to decay exponentially with genomic distance at a rate learned by the MIRA RP model from the joint multimodal data. MIRA learns independent upstream and downstream decay rates and includes parameters to weigh upstream, downstream, and promoter effects. The RP of each gene is scored as the sum of the contribution of individual regulatory elements. MIRA predicts key regulators at each locus by examining transcription factor motif enrichment or occupancy (if provided chromatin immunoprecipitation (ChIP-seq) data) within elements predicted to highly influence transcription at that locus using probabilistic in silico deletion (ISD).
+
+### MIRA LITE vs NITE Models
+MIRA quantifies the regulatory influence of local chromatin accessibility by comparing the local RP model with a second, expanded model that augments the local RP model with genome-wide accessibility states encoded by MIRA’s chromatin accessibility topics. Genes whose expression is significantly better described by this expanded model are defined as non-local chromatin accessibility-influenced transcriptional expression (NITE) genes. Genes whose transcription is sufficiently predicted by the RP model based on local accessibility alone are defined as local chromatin accessibility-influenced transcriptional expression (LITE) genes. While LITE genes appear tightly regulated by local chromatin accessibility, the transcription of NITE genes appears to be titrated without requiring extensive local chromatin remodeling. MIRA defines the extent to which the LITE model over- or under-estimates expression in each cell as “chromatin differential”, highlighting cells where transcription is decoupled from shifts in local chromatin accessibility. MIRA examines chromatin differential across the developmental continuum to reveal how variable circuitry regulates fate commitment and terminal identity.
 
 ## Citations
 
