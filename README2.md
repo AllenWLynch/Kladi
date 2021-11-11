@@ -2,7 +2,7 @@
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_logo.png" width="500" />
 </p>
 
-**MIRA (Probabilistic Multimodal <ins>M</ins>odels for <ins>I</ins>ntegrated <ins>R</ins>egulatory <ins>A</ins>nalysis)** is a comprehensive methodology that systematically contrasts transcription and accessibility to infer the regulatory circuitry driving cells along developmental trajectories. 
+**MIRA (Probabilistic Multimodal <ins>M</ins>odels for <ins>I</ins>ntegrated <ins>R</ins>egulatory <ins>A</ins>nalysis)** is a comprehensive methodology that systematically contrasts single cell transcription and accessibility to infer the regulatory circuitry driving cells along developmental trajectories. 
 
 MIRA leverages joint topic modeling of cell states and regulatory potential modeling at individual gene loci to jointly represent cell states in an efficient and interpretable latent space, infer high fidelity lineage trees, determine key regulators of fate decisions at branch points, and expose the variable influence of local accessibility on transcription at distinct loci. (See [our manuscript](#citations) for details).
 
@@ -16,6 +16,10 @@ pip install mira_multiome
 <pre>
 conda install -c conda-forge mira_multiome
 </pre>
+
+## Getting Started
+
+Please refer to [our tutorial](https://github.com/AllenWLynch/Kladi/blob/adata/docs/tutorial_clean.html) for an overview of analyses that can be achieved with MIRA using an example 10x Multiome embryonic brain dataset.
 
 ## Methodology
 
