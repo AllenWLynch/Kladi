@@ -4,7 +4,13 @@
 
 **MIRA (Probabilistic Multimodal <ins>M</ins>odels for <ins>I</ins>ntegrated <ins>R</ins>egulatory <ins>A</ins>nalysis)** is a comprehensive methodology that systematically contrasts single cell transcription and accessibility to infer the regulatory circuitry driving cells along developmental trajectories. 
 
-MIRA leverages joint topic modeling of cell states and regulatory potential modeling at individual gene loci to jointly represent cell states in an efficient and interpretable latent space, infer high fidelity lineage trees, determine key regulators of fate decisions at branch points, and expose the variable influence of local accessibility on transcription at distinct loci. (See [our manuscript](#citations) for details).
+MIRA leverages joint topic modeling of cell states and regulatory potential modeling at individual gene loci to:
+- jointly represent cell states in an efficient and interpretable latent space
+- infer high fidelity lineage trees
+- determine key regulators of fate decisions at branch points
+- expose the variable influence of local accessibility on transcription at distinct loci
+
+See [our manuscript](#citations) for details.
 
 ## Install
 
@@ -20,6 +26,46 @@ conda install -c conda-forge mira-multiome
 ## Getting Started
 
 Please refer to [our tutorial](https://github.com/AllenWLynch/Kladi/blob/adata/docs/tutorial_clean.html) for an overview of analyses that can be achieved with MIRA using an example 10x Multiome embryonic brain dataset.
+
+## Gallery
+
+With MIRA, you can analyze single cell multimodal transcriptional (RNA-seq) and accessibility (ATAC-seq) to:
+
+Construct biologically meaningful joint representations of cells progressing through developmental trajectories:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_joint_rep.png"/>
+</p>
+
+Infer high fidelity lineage trees defining developmental fate decisions:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_lineage_tree.png"/>
+</p>
+
+Learn the "topics" describing cell transcriptional and accessibility states:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_topics.png"/>
+</p>
+
+Contrast transcriptional and accessibility topics on stream graphs and determine the pathways and regulators governing in each cell state:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_streams.png"/>
+</p>
+
+Identify the transcription factors driving poised genes down diverging developmental paths, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_tf_drivers.png"/>
+</p>
+
+Identify the transcription factors driving poised genes down diverging developmental paths, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_tf_drivers.png"/>
+</p>
 
 ## Methodology
 
