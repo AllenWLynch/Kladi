@@ -131,7 +131,7 @@ MIRA was created by researchers in the X. Shirley Liu Lab at Dana-Farber Cancer 
 
 <p>&nbsp;</p>
 
-Public datasets used for analysis in gallery and tutorial:
+Public datasets used for analyses in gallery and tutorial:
 
 1. Ma, S. et al. Chromatin Potential Identified by Shared Single-Cell Profiling of RNA and Chromatin. _Cell_ (2020).
 2. Datasets - 10x Genomics. https://support.10xgenomics.com/single-cell-multiome-atac-gex/datasets.
