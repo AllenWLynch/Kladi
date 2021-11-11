@@ -19,6 +19,7 @@ MIRA can be installed from either [PyPI](https://pypi.org/project/mira-multiome)
 <pre>
 pip install mira-multiome
 </pre>
+or
 <pre>
 conda install -c conda-forge mira-multiome
 </pre>
