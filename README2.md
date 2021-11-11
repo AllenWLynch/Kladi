@@ -11,10 +11,10 @@ MIRA leverages joint topic modeling of cell states and regulatory potential mode
 MIRA can be installed from either [PyPI](https://pypi.org/project/mira_multiome) or [conda-forge](https://anaconda.org/conda-forge/mira_multiome):
 
 <pre>
-pip install mira_multiome
+pip install mira-multiome
 </pre>
 <pre>
-conda install -c conda-forge mira_multiome
+conda install -c conda-forge mira-multiome
 </pre>
 
 ## Getting Started
