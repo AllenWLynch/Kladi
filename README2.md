@@ -25,6 +25,8 @@ conda install -c conda-forge mira-multiome
 
 ## Getting Started
 
+MIRA takes count matrices of transcripts and accessible regions measured by single cell multimodal RNA-seq and ATAC-seq from any platform as input data. MIRA output integrates with AnnData data structure for interoperability with Scanpy. The initial model training is faster with GPU hardware but can be accomplished with CPU computation.
+
 Please refer to [our tutorial](https://github.com/AllenWLynch/Kladi/blob/adata/docs/tutorial_clean.html) for an overview of analyses that can be achieved with MIRA using an example 10x Multiome embryonic brain dataset.
 
 ## Gallery
@@ -55,7 +57,7 @@ Contrast transcriptional and accessibility topics on stream graphs and determine
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_streams.png"/>
 </p>
 
-Identify the transcription factors driving poised genes down diverging developmental paths, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation<sup>1</sup>:
+Identify the transcription factors driving poised genes down diverging developmental paths, predict transcription factor targets via in silico deletion of putative regulatory elements, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation<sup>1</sup>:
 
 <p align="center">
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_tf_drivers.png"/>
