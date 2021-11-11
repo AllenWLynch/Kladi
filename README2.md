@@ -31,40 +31,58 @@ Please refer to [our tutorial](https://github.com/AllenWLynch/Kladi/blob/adata/d
 
 With MIRA, you can analyze single cell multimodal transcriptional (RNA-seq) and accessibility (ATAC-seq) to:
 
-Construct biologically meaningful joint representations of cells progressing through developmental trajectories:
+Construct biologically meaningful joint representations of cells progressing through developmental trajectories<sup>1</sup>:
 
 <p align="center">
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_joint_rep.png"/>
 </p>
 
-Infer high fidelity lineage trees defining developmental fate decisions:
+Infer high fidelity lineage trees defining developmental fate decisions<sup>1</sup>:
 
 <p align="center">
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_lineage_tree.png"/>
 </p>
 
-Learn the "topics" describing cell transcriptional and accessibility states:
+Learn the "topics" describing cell transcriptional and accessibility states<sup>1</sup>:
 
 <p align="center">
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_topics.png"/>
 </p>
 
-Contrast transcriptional and accessibility topics on stream graphs and determine the pathways and regulators governing in each cell state:
+Contrast transcriptional and accessibility topics on stream graphs and determine the pathways and regulators governing in each cell state<sup>1</sup>:
 
 <p align="center">
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_streams.png"/>
 </p>
 
-Identify the transcription factors driving poised genes down diverging developmental paths, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation:
+Identify the transcription factors driving poised genes down diverging developmental paths, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation<sup>1</sup>:
 
 <p align="center">
   <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_tf_drivers.png"/>
 </p>
 
-Identify the transcription factors driving poised genes down diverging developmental paths, plot heatmaps of transcriptional and accessibility dynamics, and compare expression and motif scores of key factors on MIRA's joint representation:
+Explore gene expression within lineage trajectories and compare expression to motif score of key factors with stream graphs<sup>1</sup>:
 
 <p align="center">
-  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_tf_drivers.png"/>
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_stream_variations.png"/>
+</p>
+
+Determine the transcription factors driving fate decisions at key lineage branch points<sup>2</sup>:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_fate_drivers.png"/>
+</p>
+
+Elucidate genes with local chromatin accessibility-influenced transcriptional expression (LITE) versus non-local chromatin accessibility-influenced transcriptional expression (NITE) and plot "chromatin differential" to highlight cells where transcription is decoupled from shifts in local chromatin accessibility<sup>2</sup>:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_chrom_diff.png"/>
+</p>
+
+Quantify NITE regulation of topics or cells across the developmental continuum to reveal how variable circuitry regulates fate commitment and terminal identity.<sup>1,2</sup>:
+
+<p align="center">
+  <img src="https://github.com/AllenWLynch/Kladi/blob/adata/docs/graphics/mira_nite_stream.png"/>
 </p>
 
 ## Methodology
@@ -84,4 +102,11 @@ MIRA quantifies the regulatory influence of local chromatin accessibility by com
 
 ## Citations
 
-MIRA was created by researchers in the X. Shirley Liu Lab at Dana-Farber Cancer Institute. If you use MIRA in your research, we would appreciate citation of [our manuscript](bioarxiv_link) ([bibtex](https://github.com/AllenWLynch/Kladi/blob/adata/docs/references/mira_bioarxiv.bib)). 
+MIRA was created by researchers in the X. Shirley Liu Lab at Dana-Farber Cancer Institute. If you use MIRA in your research, we would appreciate citation of [our manuscript](bioarxiv_link) ([bibtex](https://github.com/AllenWLynch/Kladi/blob/adata/docs/references/mira_bioarxiv.bib)).
+
+<p>&nbsp;</p>
+
+Public datasets used for analysis in gallery and tutorial:
+
+1. Ma, S. et al. Chromatin Potential Identified by Shared Single-Cell Profiling of RNA and Chromatin. _Cell_ (2020).
+2. Datasets - 10x Genomics. https://support.10xgenomics.com/single-cell-multiome-atac-gex/datasets.
