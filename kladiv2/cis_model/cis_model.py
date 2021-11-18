@@ -611,8 +611,9 @@ class GeneCisModel:
 
         p = mu / (mu + params['theta'])
 
-        logp_data = nbinom(params['theta'], 1 - p).logpmf(expression).sum(0)
-        return logp_data[0] - logp_data[1:]
+        logp_data = nbinom(params['theta'], 1 - p).logpmf(expression)
+        logp_summary = logp_data.sum(0)
+        return logp_summary[0] - logp_summary[1:], f_Z, expression, logp_data
 
 
     def probabalistic_ISD(self, features, hits_matrix, n_samples = 1000, n_bins = 20):
@@ -634,11 +635,11 @@ class GeneCisModel:
         samples_mask[informative_samples] = 1
         samples_mask = samples_mask.astype(bool)
         
-        return self._prob_ISD(
+        return (*self._prob_ISD(
             hits_matrix, **features, 
             params = self.get_normalized_params(), 
             bn_eps= self.bn.eps
-        ), samples_mask
+        ), samples_mask)
 
 
 def main(*,atac_adata, rna_adata, expr_model, accessibility_model, genes, save_prefix,

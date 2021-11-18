@@ -2,6 +2,7 @@
 
 
 from functools import partial
+from scipy import interpolate
 import pyro
 import pyro.distributions as dist
 import torch
@@ -18,8 +19,10 @@ from math import ceil
 import time
 from pyro.contrib.autoname import scope
 from sklearn.base import BaseEstimator
-from kladiv2.core.adata_interface import *
-
+import kladiv2.core.adata_interface as adi
+import kladiv2.topic_model.interface as tmi
+import gc
+import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 class EarlyStopping:
@@ -133,8 +136,8 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         return model
 
     def __init__(self,
-            highly_variable_key = None,
-            predict_expression_key = None,
+            endogenous_key = None,
+            exogenous_key = None,
             counts_layer = None,
             num_topics = 16,
             hidden = 128,
@@ -148,12 +151,11 @@ class BaseModel(torch.nn.Module, BaseEstimator):
             max_learning_rate = 1e-1,
             beta = 0.95,
             batch_size = 64,
-            training_bar = True,
             ):
         super().__init__()
 
-        self.highly_variable_key = highly_variable_key
-        self.predict_expression_key = predict_expression_key
+        self.endogenous_key = endogenous_key
+        self.exogenous_key = exogenous_key
         self.counts_layer = counts_layer
         self.num_topics = num_topics
         self.hidden = hidden
@@ -167,7 +169,6 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         self.max_learning_rate = max_learning_rate
         self.beta = beta
         self.batch_size = batch_size
-        self.training_bar = training_bar
 
     def _set_seeds(self):
         if self.seed is None:
@@ -177,8 +178,13 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         pyro.set_rng_seed(self.seed)
         np.random.seed(self.seed)
 
-    def _get_weights(self, on_gpu = True):
-
+    def _get_weights(self, on_gpu = True, inference_mode = False):
+        
+        try:
+            del self.svi
+        except AttributeError:
+            pass
+        gc.collect()
         pyro.clear_param_store()
         torch.cuda.empty_cache()
         self._set_seeds()
@@ -191,7 +197,10 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         use_cuda = torch.cuda.is_available() and self.use_cuda and on_gpu
         self.device = torch.device('cuda:0' if use_cuda else 'cpu')
         if not use_cuda:
-            logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
+            if not inference_mode:
+                logger.warn('Cuda unavailable. Will not use GPU speedup while training.')
+            else:
+                logger.info('Moving model to CPU for inference.')
 
         self.decoder = Decoder(
             num_exog_features=self.num_exog_features, 
@@ -230,7 +239,7 @@ class BaseModel(torch.nn.Module, BaseEstimator):
     def guide(self):
 
         _counts_mu, _counts_var = self._get_lognormal_parameters_from_moments(*self._get_gamma_moments(self.I, self.num_topics))
-        pseudocount_mu = pyro.param('pseudocount_mu', _counts_mu * torch.ones((self.num_topics,)).to(self.device), constraint = constraints.positive)
+        pseudocount_mu = pyro.param('pseudocount_mu', _counts_mu * torch.ones((self.num_topics,)).to(self.device))
 
         pseudocount_std = pyro.param('pseudocount_std', np.sqrt(_counts_var) * torch.ones((self.num_topics,)).to(self.device), 
                 constraint = constraints.positive)
@@ -334,8 +343,8 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         assert(len(f) == self.num_exog_features)
         self._features = f
 
-
-    def _fit(self,*,features, highly_variable, endog_features, exog_features):
+    def _instantiate_model(self,*, features, highly_variable,
+        endog_features, exog_features):
 
         assert(isinstance(self.num_epochs, int) and self.num_epochs > 0)
         assert(isinstance(self.batch_size, int) and self.batch_size > 0)
@@ -352,7 +361,159 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         self.highly_variable = highly_variable
         
         self._get_weights()
+
+    @adi.wraps_modelfunc(adata_extractor=tmi.fit_adata, 
+        del_kwargs=['features','highly_variable','endog_features','exog_features'])
+    def get_learning_rate_bounds(self, num_epochs = 6, eval_every = 10, 
+        lower_bound_lr = 1e-6, upper_bound_lr = 1,*,
+        features, highly_variable, endog_features, exog_features):
+
+        self._instantiate_model(
+            features = features, highly_variable = highly_variable, 
+            endog_features = endog_features, exog_features = exog_features,
+        )
+        n_batches = self.get_num_batches(endog_features.shape[0], self.batch_size)
+
+        eval_steps = ceil((n_batches * num_epochs)/eval_every)
+        learning_rates = np.exp(
+                np.linspace(np.log(lower_bound_lr), 
+                np.log(upper_bound_lr), 
+                eval_steps+1))
+
+        def lr_function(e):
+            return learning_rates[e]/learning_rates[0]
+
+        scheduler = pyro.optim.LambdaLR({'optimizer': Adam, 
+            'optim_args': {'lr': learning_rates[0], 'betas' : (0.95, 0.999)}, 
+            'lr_lambda' : lr_function})
+
+        self.svi = SVI(self.model, self.guide, scheduler, loss=TraceMeanField_ELBO())
+        batches_complete, steps_complete, step_loss = 0,0,0
+        learning_rate_losses = []
         
+        try:
+            t = trange(eval_steps, desc = 'Learning rate range test', leave = True)
+            _t = iter(t)
+
+            for epoch in range(num_epochs + 1):
+
+                #train step
+                self.train()
+                for batch in self._iterate_batches(endog_features = endog_features, 
+                        exog_features = exog_features, 
+                        batch_size = self.batch_size, bar = False):
+
+                    step_loss += float(self.svi.step(**batch, anneal_factor = 1.))
+                    batches_complete+=1
+                    
+                    if batches_complete % eval_every == 0 and batches_complete > 0:
+                        steps_complete+=1
+                        scheduler.step()
+                        learning_rate_losses.append(step_loss/(eval_every * self.batch_size * self.num_exog_features))
+                        step_loss = 0.0
+                        try:
+                            next(_t)
+                        except StopIteration:
+                            break
+
+        except ValueError:
+            logger.error('\nGradient overflow from too high learning rate, stopping test early.')
+
+        self.gradient_lr = np.array(learning_rates[:len(learning_rate_losses)])
+        self.gradient_loss = np.array(learning_rate_losses)
+
+        return self.trim_learning_rate_bounds()
+
+
+    @staticmethod
+    def _define_boundaries(learning_rate, loss, lower_bound_trim, upper_bound_trim):
+
+        assert(isinstance(learning_rate, np.ndarray))
+        assert(isinstance(loss, np.ndarray))
+        assert(learning_rate.shape == loss.shape)
+        
+        learning_rate = np.log(learning_rate)
+        bounds = learning_rate.min()-1, learning_rate.max()+1
+        
+        x = np.concatenate([[bounds[0]], learning_rate, [bounds[1]]])
+        y = np.concatenate([[loss.min()], loss, [loss.max()]])
+        spline_fit = interpolate.splrep(x, y, k = 5, s= 5)
+        
+        x_fit = np.linspace(*bounds, 100)
+        
+        first_div = interpolate.splev(x_fit, spline_fit, der = 1)
+        
+        cross_points = np.concatenate([[0], np.argwhere(np.abs(np.diff(np.sign(first_div))) > 0)[:,0], [len(first_div) - 1]])
+        longest_segment = np.argmax(np.diff(cross_points))
+        
+        left, right = cross_points[[longest_segment, longest_segment+1]]
+        
+        start, end = x_fit[[left, right]] + np.array([lower_bound_trim, -upper_bound_trim])
+        #optimal_lr = x_fit[left + first_div[left:right].argmin()]
+        
+        return np.exp(start), np.exp(end), spline_fit
+
+    def set_learning_rates(self, min_lr, max_lr):
+        self.set_params(min_learning_rate = min_lr, max_learning_rate= max_lr)
+
+    def trim_learning_rate_bounds(self, 
+        lower_bound_trim = 0., 
+        upper_bound_trim = 0.5):
+
+        try:
+            self.gradient_lr
+        except AttributeError:
+            raise Exception('User must run "get_learning_rate_bounds" before running this function')
+
+        assert(isinstance(lower_bound_trim, (int,float)) and lower_bound_trim >= 0)
+        assert(isinstance(upper_bound_trim, (float, int)) and upper_bound_trim >= 0)
+
+        min_lr, max_lr, self.spline = \
+            self._define_boundaries(self.gradient_lr, 
+                                    self.gradient_loss, 
+                                    lower_bound_trim = lower_bound_trim,
+                                    upper_bound_trim = upper_bound_trim,
+            )
+
+        self.set_learning_rates(min_lr, max_lr)
+        return min_lr, max_lr
+
+    def plot_learning_rate_bounds(self, figsize = (10,7), ax = None):
+
+        try:
+            self.gradient_lr
+        except AttributeError:
+            raise Exception('User must run "get_learning_rate_bounds" before running this function')
+
+        if ax is None:
+            fig, ax = plt.subplots(1,1,figsize = figsize)
+
+        x = np.log(self.gradient_lr)
+        bounds = x.min(), x.max()
+
+        x_fit = np.linspace(*bounds, 100)
+        y_spline = interpolate.splev(x_fit, self.spline)
+
+        ax.scatter(self.gradient_lr, self.gradient_loss, color = 'lightgrey', label = 'Batch Loss')
+        ax.plot(np.exp(x_fit), y_spline, color = 'grey', label = '')
+        ax.axvline(self.min_learning_rate, color = 'red', label = 'Min/Max Learning Rate')
+        ax.axvline(self.max_learning_rate, color = 'red', label = '')
+
+        legend_kwargs = dict(loc="upper left", markerscale = 1, frameon = False, fontsize='large', bbox_to_anchor=(1.0, 1.05))
+        ax.legend(**legend_kwargs)
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+        ax.set(xlabel = 'Learning Rate', ylabel = 'Loss', xscale = 'log')
+        return ax
+
+
+    def _fit(self,*,training_bar = True, 
+            features, highly_variable, endog_features, exog_features):
+
+        self._instantiate_model(
+            features = features, highly_variable = highly_variable, 
+            endog_features = endog_features, exog_features = exog_features,
+        )
         n_observations = endog_features.shape[0]
         n_batches = self.get_num_batches(n_observations, self.batch_size)
 
@@ -370,7 +531,7 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         self.anneal_factors = []
         try:
 
-            t = trange(self.num_epochs+1, desc = 'Epoch 0', leave = True) if self.training_bar else range(self.num_epochs+1)
+            t = trange(self.num_epochs+1, desc = 'Epoch 0', leave = True) if training_bar else range(self.num_epochs+1)
             _t = iter(t)
             epoch = 0
             while True:
@@ -402,13 +563,15 @@ class BaseModel(torch.nn.Module, BaseEstimator):
                 self.training_loss.append(epoch_loss)
                 recent_losses = self.training_loss[-5:]
 
-                if self.training_bar:
+                if training_bar:
                     t.set_description("Epoch {} done. Recent losses: {}".format(
                         str(epoch + 1),
                         ' --> '.join('{:.3e}'.format(loss) for loss in recent_losses)
                     ))
 
                 epoch+=1
+                yield epoch, epoch_loss
+
                 if early_stopper(recent_losses[-1]) and epoch > self.num_epochs:
                     break
 
@@ -419,10 +582,20 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         self.eval()
         return self
 
-    @wraps_modelfunc(adata_extractor=fit_adata, 
+    @adi.wraps_modelfunc(adata_extractor=tmi.fit_adata, adata_adder = adi.return_output,
         del_kwargs=['features','highly_variable','endog_features','exog_features'])
     def fit(self,*,features, highly_variable, endog_features, exog_features):
-        return self._fit(features = features, highly_variable = highly_variable, 
+        for _ in self._fit(features = features, highly_variable = highly_variable, 
+            endog_features = endog_features, exog_features = exog_features):
+            pass
+
+        return self
+
+    @adi.wraps_modelfunc(adata_extractor=tmi.fit_adata, adata_adder = adi.return_output,
+    del_kwargs=['features','highly_variable','endog_features','exog_features'])
+    def _internal_fit(self,*,features, highly_variable, endog_features, exog_features):
+        return self._fit(training_bar = False, 
+            features = features, highly_variable = highly_variable, 
             endog_features = endog_features, exog_features = exog_features)
 
 
@@ -441,7 +614,7 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         return results
 
 
-    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= add_topic_comps,
+    @adi.wraps_modelfunc(adata_extractor=tmi.fetch_features, adata_adder= tmi.add_topic_comps,
         del_kwargs=['endog_features','exog_features'])
     def predict(self, batch_size = 512, *,endog_features, exog_features):
         return self._run_encoder_fn(self.encoder.topic_comps, batch_size = batch_size, 
@@ -449,8 +622,12 @@ class BaseModel(torch.nn.Module, BaseEstimator):
 
 
     @staticmethod
-    def centered_boxcox_transform(x, a):
-        x = (x**a - 1)/a
+    def centered_boxcox_transform(x, a = 'log'):
+        if not a == 'log':
+            x = (x**a - 1)/a
+        else:
+            x = np.log(x)
+
         return x - x.mean(-1, keepdims = True)
 
     @staticmethod
@@ -463,14 +640,12 @@ class BaseModel(torch.nn.Module, BaseEstimator):
             basis[:, j] = e
         return basis
 
-
     def _project_to_orthospace(self, compositions):
 
         basis = self._gram_schmidt_basis(compositions.shape[-1])
-        return self.centered_boxcox_transform(compositions, 0.25).dot(basis)
+        return self.centered_boxcox_transform(compositions, a = 'log').dot(basis)
     
-
-    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= add_umap_features,
+    @adi.wraps_modelfunc(adata_extractor=tmi.fetch_features, adata_adder= tmi.add_umap_features,
         del_kwargs=['endog_features','exog_features'])
     def get_umap_features(self,batch_size = 512, *,endog_features, exog_features):
         
@@ -478,14 +653,24 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         return self._project_to_orthospace(compositions)
 
 
-    def _get_logp(self,*,endog_features, exog_features):
-        pass
+    def _get_elbo_loss(self,*,endog_features, exog_features):
+
+        self.eval()
+        running_loss = 0
+
+        for batch in self._iterate_batches(endog_features = endog_features, 
+                        exog_features = exog_features, 
+                        batch_size = 512, bar = False):
+                    
+            running_loss += float(self.svi.evaluate_loss(**batch, anneal_factor = 1.0))
+
+        return running_loss
     
-    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= return_output,
+    @adi.wraps_modelfunc(adata_extractor=tmi.fetch_features, adata_adder= adi.return_output,
         del_kwargs=['endog_features','exog_features'])
     def score(self,*,endog_features, exog_features):
         self.eval()
-        return self._get_logp(endog_features = endog_features, exog_features = exog_features)\
+        return self._get_elbo_loss(endog_features = endog_features, exog_features = exog_features)\
             /(endog_features.shape[0] * self.num_exog_features)
 
     
@@ -508,7 +693,7 @@ class BaseModel(torch.nn.Module, BaseEstimator):
                     batch_size= batch_size, bar = bar)
         
 
-    @wraps_modelfunc(adata_extractor=get_topic_comps, adata_adder=add_imputed_vals,
+    @adi.wraps_modelfunc(adata_extractor=tmi.fetch_topic_comps, adata_adder=adi.add_imputed_vals,
         del_kwargs=['topic_compositions'])
     def impute(self, batch_size = 512, bar = True, *, topic_compositions):
         return np.vstack([
@@ -516,7 +701,7 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         ])
 
 
-    @wraps_modelfunc(adata_extractor = get_topic_comps, adata_adder = partial(add_obs_col, colname = 'softmax_denom'), 
+    @adi.wraps_modelfunc(adata_extractor = tmi.fetch_topic_comps, adata_adder = partial(adi.add_obs_col, colname = 'softmax_denom'), 
         del_kwargs = ['topic_compositions'])
     def _get_softmax_denom(self, topic_compositions, batch_size = 512, bar = True):
         return np.concatenate([
@@ -548,7 +733,7 @@ class BaseModel(torch.nn.Module, BaseEstimator):
         for param, value in fit_params.items():
             setattr(self, param, value)
         
-        self._get_weights(on_gpu = False)
+        self._get_weights(on_gpu = False, inference_mode = True)
 
         self.load_state_dict(weights)
         self.eval()

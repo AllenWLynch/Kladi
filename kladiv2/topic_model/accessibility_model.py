@@ -44,6 +44,7 @@ class DANEncoder(nn.Module):
     def __init__(self,*,num_endog_features, num_topics, hidden, dropout, num_layers):
         super().__init__()
 
+        self.dropout_rate = dropout
         self.drop = nn.Dropout(dropout)
         self.embedding = nn.Embedding(num_endog_features + 1, hidden, padding_idx=0)
         self.num_topics = num_topics
@@ -53,9 +54,17 @@ class DANEncoder(nn.Module):
         )
 
     def forward(self, idx, read_depth):
+       
+        if self.training:
+            corrupted_idx = torch.multiply(
+                torch.empty_like(idx).bernoulli_(1-self.dropout_rate),
+                idx
+            )
+        else:
+            corrupted_idx = idx
 
-        embeddings = self.drop(self.embedding(idx)) # N, T, D
-        
+        embeddings = self.embedding(corrupted_idx) # N, T, D
+       
         ave_embeddings = embeddings.sum(1)/read_depth
 
         X = torch.cat([ave_embeddings, read_depth.log()], dim = 1) #inject read depth into model
@@ -63,18 +72,18 @@ class DANEncoder(nn.Module):
         X = self.fc_layers(X)
 
         theta_loc = X[:, :self.num_topics]
-        theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])   
+        theta_scale = F.softplus(X[:, self.num_topics:(2*self.num_topics)])  
 
         return theta_loc, theta_scale
 
     def topic_comps(self, idx, read_depth):
         theta = self.forward(idx, read_depth)[0]
         theta = theta.exp()/theta.exp().sum(-1, keepdim = True)
-        
+       
         return theta.detach().cpu().numpy()
 
 
-class AccessibilityModel(BaseModel):
+class AccessibilityTopicModel(BaseModel):
 
     encoder_model = DANEncoder
 

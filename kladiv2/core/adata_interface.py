@@ -69,7 +69,7 @@ def wraps_functional(*,
     return run
 
 def wraps_modelfunc(*,
-    adata_extractor,
+    adata_extractor = lambda self, adata : {},
     adata_adder = lambda self, adata, output : None,
     del_kwargs = []
 ):
@@ -133,6 +133,11 @@ def fetch_layer(adata, layer):
     else:
         return adata.layers[layer].copy()
 
+def fetch_adata_shape(self, adata):
+    return dict(
+        shape = adata.shape
+    )
+
 def return_output(self, adata, output):
     return output
 
@@ -172,64 +177,6 @@ def add_imputed_vals(self, adata, output, add_layer = 'imputed'):
     new_layer[:, original_to_imputed_map] = output
 
     adata.layers[add_layer] = new_layer
-
-
-## TOPIC MODEL INTERFACE ##
-
-def fit_adata(self, adata):
-
-    if self.predict_expression_key is None:
-        predict_mask = np.ones(adata.shape[-1]).astype(bool)
-    else:
-        predict_mask = adata.var_vector(self.predict_expression_key)
-        logger.info('Predicting expression from genes from col: ' + self.predict_expression_key)
-            
-    adata = adata[:, predict_mask]
-
-    if self.highly_variable_key is None:
-        highly_variable = np.ones(adata.shape[-1].astype(bool))
-    else:
-        highly_variable = adata.var_vector(self.highly_variable_key)
-        logger.info('Using highly-variable genes from col: ' + self.highly_variable_key)
-
-    features = adata.var_names.values
-
-    return dict(
-        features = features,
-        highly_variable = highly_variable,
-        endog_features = fetch_layer(adata[:, highly_variable], self.counts_layer),
-        exog_features = fetch_layer(adata, self.counts_layer)
-    )
-
-def extract_features(self, adata):
-
-    adata = adata[:, self.features]
-
-    return dict(
-        endog_features = fetch_layer(adata[:, self.highly_variable], self.counts_layer),
-        exog_features = fetch_layer(adata, self.counts_layer),
-    )
-
-def get_topic_comps(self, adata, key = 'X_topic_compositions'):
-    logger.info('Fetching key {} from obsm'.format(key))
-    return dict(topic_compositions = adata.obsm[key])
-
-
-def add_topic_comps(self, adata, output, add_key = 'X_topic_compositions', add_cols = True, col_prefix = 'topic_'):
-
-    logger.info('Added key to obsm: ' + add_key)
-    adata.obsm[add_key] = output
-
-    if add_cols:
-        K = output.shape[-1]
-        cols = [col_prefix + str(i) for i in range(K)]
-        logger.info('Added cols: ' + ', '.join(cols))
-        adata.obs[cols] = output
-
-
-def add_umap_features(self, adata, output, add_key = 'X_umap_features'):
-    logger.info('Added key to obsm: ' + add_key)
-    adata.obsm[add_key] = output
 
 ## ACCESSIBILITY DATA INTERFACE ##
 
@@ -490,7 +437,7 @@ def wraps_rp_func(adata_adder = lambda self, expr_adata, atac_adata, output, **k
 
 def add_isd_results(self, expr_adata, atac_adata, output, factor_type = 'motifs', **kwargs):
 
-    ko_logp, informative_samples = list(zip(*output))
+    ko_logp, f_Z, expression, logp_data, informative_samples = list(zip(*output))
 
     factor_mask = atac_adata.uns[factor_type]['in_expr_data']
     
@@ -509,6 +456,8 @@ def add_isd_results(self, expr_adata, atac_adata, output, factor_type = 'motifs'
     informative_samples = np.where(~np.isnan(informative_samples), informative_samples, 0)
     expr_adata.layers[factor_type + '-informative_samples'] = sparse.csr_matrix(informative_samples)
     logger.info('Added key to layers: {}-informative_samples'.format(factor_type))
+
+    return f_Z, expression, logp_data
 
 
 ## PSEUDOTIME STUFF ##

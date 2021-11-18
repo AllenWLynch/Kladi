@@ -36,7 +36,7 @@ class MemoryBedTrack(DynamicTrack, BedTrack):
         
         with open(self.get_source_name(), 'w') as f:
 
-            for region in self.regions:
+            for region in sorted(self.regions, key = lambda r : (str(r[0]), int(r[1]))):
                 print(*region, sep = '\t', file = f)
 
 

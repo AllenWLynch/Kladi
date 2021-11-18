@@ -10,7 +10,6 @@ import logging
 from kladi.core.plot_utils import map_plot
 import matplotlib.pyplot as plt
 import numpy as np
-import logging
 from scipy.sparse import isspmatrix
 from functools import wraps
 import inspect
@@ -79,7 +78,7 @@ class GenomeView(Context):
         **resources):
 
         self.workdir = workdir
-        self.cores = 1
+        self.cores = cores
         self.resources = resources
         self.skip_snakemake = skip_snakemake
 
@@ -196,18 +195,21 @@ class GenomeView(Context):
         for track in self.tracks:
             track.transform_source()
 
+        with open(self.track_config_path, 'w') as f:
+            f.write(self.get_track_config())
+            
+        logging.info('Track config saved to {}.'.format(self.track_config_path))
+
+        snake_cmd = ' '.join(['snakemake', '-s', self.snakefile_path, '--cores', str(self.cores),'-q'])
+        logging.info(snake_cmd)
         if not self.skip_snakemake:
             ret = subprocess.run(
-                ['snakemake', '-s', self.snakefile_path, '--cores', str(self.cores),'-q'], 
-                capture_output=True
+                snake_cmd, 
+                capture_output=True, shell = True,
             )
 
             if not ret.returncode == 0:
                 raise PipelineException(ret.stderr.decode())
-
-        with open(self.track_config_path, 'w') as f:
-            f.write(self.get_track_config())
-        logging.info('Track config saved to {}.'.format(self.track_config_path))
 
     def get_track(self, track_id):
 
@@ -240,7 +242,8 @@ class GenomeView(Context):
         if not font_size is None:
             plot_args.extend(['--fontSize', str(font_size)])
 
-        ret = subprocess.run(plot_args, capture_output = True)
+        logging.info(' '.join(plot_args))
+        ret = subprocess.run(' '.join(plot_args), capture_output = True, shell = True)
         if not ret.returncode == 0:
             raise Exception(ret.stderr.decode())
 

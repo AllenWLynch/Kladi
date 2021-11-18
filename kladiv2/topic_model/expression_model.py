@@ -12,11 +12,10 @@ import warnings
 from scipy.sparse import isspmatrix
 from functools import partial
 from pyro import poutine
-from kladiv2.core.adata_interface import *
+import kladiv2.core.adata_interface as adi
+import kladiv2.topic_model.interface as tmi
 import kladiv2.tools.enrichr_enrichments as enrichr
 import logging
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +57,7 @@ class ExpressionEncoder(torch.nn.Module):
         return self.forward(X, read_depth)[2].detach().cpu().numpy()
 
 
-class ExpressionModel(BaseModel):
+class ExpressionTopicModel(BaseModel):
 
     encoder_model = ExpressionEncoder
 
@@ -131,7 +130,8 @@ class ExpressionModel(BaseModel):
                     "read_depth", dist.LogNormal(rd_loc.reshape((-1,1)), rd_scale.reshape((-1,1))).to_event(1)
                 )
 
-    @wraps_modelfunc(adata_extractor=extract_features, adata_adder= partial(add_obs_col, colname = 'model_read_scale'),
+    @adi.wraps_modelfunc(adata_extractor=tmi.fetch_features,
+        adata_adder= partial(adi.add_obs_col, colname = 'model_read_scale'),
         del_kwargs=['endog_features','exog_features'])
     def _get_read_depth(self, *, endog_features, exog_features, batch_size = 512):
 
